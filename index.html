@@ -951,6 +951,7 @@ function PeopleTab({ title, tone, kind, data, patch }) {
   const [addEntryFor, setAddEntryFor] = useState(null);
   const [editEntry, setEditEntry] = useState(null);
   const [payEntry, setPayEntry] = useState(null);
+  const [settleAllFor, setSettleAllFor] = useState(null);
   const [expanded, setExpanded] = useState(null);
 
   const removePerson = (id) => {
@@ -1007,6 +1008,49 @@ function PeopleTab({ title, tone, kind, data, patch }) {
     });
   };
 
+  // Settles every unpaid entry for a person at once. If they paid more than
+  // the total owed, the extra is recorded as a new entry on the opposite
+  // ledger (so if they overpay what they owed you, you now owe them the difference).
+  const settleAll = (personId, personName, { amount, accountId, date }) => {
+    const unpaid = entries
+      .filter((e) => e.personId === personId && !e.paid)
+      .sort((a, b) => new Date(a.date) - new Date(b.date)); // oldest debt paid off first
+    const outstanding = unpaid.reduce((sum, e) => sum + Number(e.amount || 0), 0);
+    const extra = amount - outstanding;
+    patch((d) => {
+      let accounts = bumpAccount(d.accounts, accountId, kind === "owedMe" ? amount : -amount);
+      let remaining = amount;
+      const newEntries = [];
+      unpaid.forEach((e) => {
+        if (remaining <= 0.01) { newEntries.push(e); return; } // untouched, still fully unpaid
+        if (remaining >= e.amount - 0.01) {
+          newEntries.push({ ...e, paid: true, paidAccountId: accountId, paidDate: date });
+          remaining -= e.amount;
+        } else {
+          // partial payment lands mid-entry: split into a paid portion and a smaller remaining unpaid portion
+          newEntries.push({ ...e, id: uid(), amount: remaining, paid: true, paidAccountId: accountId, paidDate: date });
+          newEntries.push({ ...e, amount: e.amount - remaining });
+          remaining = 0;
+        }
+      });
+      const updatedEntries = d[entriesKey]
+        .filter((e) => !(e.personId === personId && !e.paid)) // remove the old unpaid ones we just replaced
+        .concat(newEntries);
+      const result = { accounts, [entriesKey]: updatedEntries };
+      if (extra > 0.01) {
+        const oppositePeopleKey = kind === "owedMe" ? "peopleIOwe" : "peopleOwedMe";
+        const oppositeEntriesKey = kind === "owedMe" ? "entriesIOwe" : "entriesOwedMe";
+        let oppositePeople = d[oppositePeopleKey];
+        let match = oppositePeople.find((p) => p.name.toLowerCase() === personName.toLowerCase());
+        if (!match) { match = { id: uid(), name: personName }; oppositePeople = [...oppositePeople, match]; }
+        result[oppositePeopleKey] = oppositePeople;
+        result[oppositeEntriesKey] = [...d[oppositeEntriesKey], { id: uid(), personId: match.id, amount: extra, date, details: "Overpayment from settling up", paid: false, source: null }];
+      }
+      return result;
+    });
+    setSettleAllFor(null);
+  };
+
   return (
     <div>
       <RowHead title={title} onAdd={() => setShowAddPerson(true)} addLabel="Add person" />
@@ -1036,7 +1080,12 @@ function PeopleTab({ title, tone, kind, data, patch }) {
             </div>
             {isOpen && (
               <div style={s.cardBody}>
-                <button style={s.smallAddBtn} onClick={() => setAddEntryFor(p.id)}><Plus size={13} /> Add entry</button>
+                <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                  <button style={s.smallAddBtn} onClick={() => setAddEntryFor(p.id)}><Plus size={13} /> Add entry</button>
+                  {personEntries.filter((e) => !e.paid).length > 0 && (
+                    <button style={{ ...s.smallAddBtn, color: "#4C9A82" }} onClick={() => setSettleAllFor(p)}><Check size={13} /> Log payment (owes {fmt(outstanding)})</button>
+                  )}
+                </div>
                 {personEntries.length === 0 ? <Empty text="No entries yet." /> : personEntries.map((e) => (
                   <div key={e.id} style={s.historyRow} onClick={() => !e.paid && setEditEntry(e)}>
                     <span style={{ textDecoration: e.paid ? "line-through" : "none", color: e.paid ? "#5C6478" : "#EAEBEF" }}>{fmtDate(e.date)}</span>
@@ -1071,6 +1120,16 @@ function PeopleTab({ title, tone, kind, data, patch }) {
       {payEntry && (
         <Modal title={kind === "owedMe" ? "Mark as paid to you" : "Mark as paid by you"} onClose={() => setPayEntry(null)}>
           <MarkPaidForm accounts={data.accounts} label={kind === "owedMe" ? "Deposit into" : "Pay from"} onSave={(accountId) => markPaid(payEntry, accountId)} />
+        </Modal>
+      )}
+      {settleAllFor && (
+        <Modal title={kind === "owedMe" ? `Log payment from ${settleAllFor.name}` : `Log payment to ${settleAllFor.name}`} onClose={() => setSettleAllFor(null)}>
+          <SettleAllForm
+            accounts={data.accounts}
+            kind={kind}
+            outstanding={entries.filter((e) => e.personId === settleAllFor.id && !e.paid).reduce((sum, e) => sum + Number(e.amount || 0), 0)}
+            onSave={(v) => settleAll(settleAllFor.id, settleAllFor.name, v)}
+          />
         </Modal>
       )}
     </div>
@@ -1108,6 +1167,39 @@ function PersonEntryForm({ accounts, cards, kind, initial, onSave }) {
         </select>
       </Field>
       <Field label="Details (optional)"><input style={s.input} value={details} onChange={(e) => setDetails(e.target.value)} placeholder="e.g. lent for rent" /></Field>
+    </FormShell>
+  );
+}
+function SettleAllForm({ accounts, kind, outstanding, onSave }) {
+  const [amount, setAmount] = useState(String(outstanding));
+  const [accountId, setAccountId] = useState(accounts[0]?.id || "");
+  const [date, setDate] = useState(todayISO());
+  if (accounts.length === 0) return <Empty text="Add a bank or cash account first, under Wallet." />;
+  const numAmount = Number(amount);
+  const extra = numAmount - outstanding;
+  const short = outstanding - numAmount;
+  const valid = amount !== "" && accountId && numAmount > 0;
+  const verb = kind === "owedMe" ? "received" : "paid";
+  return (
+    <FormShell onSubmit={() => valid && onSave({ amount: numAmount, accountId, date })} valid={valid} submitLabel="Log payment">
+      <div style={{ fontSize: 13, marginBottom: 12 }}>Total owed: <strong>{fmt(outstanding)}</strong></div>
+      <Field label={`Amount ${verb} (AED)`}><input style={s.input} type="number" value={amount} onChange={(e) => setAmount(e.target.value)} autoFocus /></Field>
+      <Field label="Date"><input style={s.input} type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+      <Field label={kind === "owedMe" ? "Deposit into" : "Pay from"}>
+        <select style={s.input} value={accountId} onChange={(e) => setAccountId(e.target.value)}>
+          {accounts.map((a) => <option key={a.id} value={a.id}>{a.name} ({fmt(a.balance)})</option>)}
+        </select>
+      </Field>
+      {extra > 0.01 && (
+        <div style={{ fontSize: 12, color: "#C6A15B", marginBottom: 8 }}>
+          That's {fmt(extra)} more than owed — it'll be recorded as {kind === "owedMe" ? "you now owing them" : "them now owing you"} {fmt(extra)}.
+        </div>
+      )}
+      {short > 0.01 && (
+        <div style={{ fontSize: 12, color: "#8B93A3", marginBottom: 8 }}>
+          That's a partial payment. It'll pay off your oldest entries first, and split whichever entry it lands in the middle of — so {fmt(short)} will still show as owed after this.
+        </div>
+      )}
     </FormShell>
   );
 }
