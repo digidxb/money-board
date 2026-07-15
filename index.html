@@ -1,0 +1,1143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+<title>Money Board</title>
+<meta name="theme-color" content="#12151C" />
+</head>
+<body style="margin:0; background:#12151C;">
+<div id="root"></div>
+<script>
+  window.addEventListener("error", function (e) {
+    var root = document.getElementById("root");
+    if (root && !root.dataset.rendered) {
+      root.innerHTML = '<div style="color:#fff;background:#3A241F;border:1px solid #B85C4A;margin:20px;padding:16px;border-radius:8px;font-family:monospace;white-space:pre-wrap;font-size:13px;">Something failed to load:\n\n' +
+        (e.message || "Unknown error") + '\n\nFile: ' + (e.filename || "?") + ' Line: ' + (e.lineno || "?") +
+        '\n\nScreenshot this and send it back.</div>';
+    }
+  });
+</script>
+
+<!-- React -->
+<script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7/babel.min.js" crossorigin></script>
+
+<!-- Firebase (compat build, no bundler needed) -->
+<script src="https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-app-compat.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-auth-compat.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/firebase@10.12.2/firebase-firestore-compat.js"></script>
+
+<script>
+  // ===== PASTE YOUR FIREBASE CONFIG BELOW (see README) =====
+  const firebaseConfig = {
+  // Import the functions you need from the SDKs you need
+import { initializeApp } from "firebase/app";
+// TODO: Add SDKs for Firebase products that you want to use
+// https://firebase.google.com/docs/web/setup#available-libraries
+
+// Your web app's Firebase configuration
+const firebaseConfig = {
+  apiKey: "AIzaSyDtfCaYx_YerYhJG7kKPfZ3ht0B07g0CKU",
+  authDomain: "money-board-63c70.firebaseapp.com",
+  projectId: "money-board-63c70",
+  storageBucket: "money-board-63c70.firebasestorage.app",
+  messagingSenderId: "632749176039",
+  appId: "1:632749176039:web:b138bed800749f52fd9e42"
+};
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
+  };
+  // If you haven't pasted real Firebase keys in yet, OR if the Firebase
+  // scripts above got blocked by a network/firewall, run in local preview
+  // mode: no sign-in needed, but nothing is saved between reloads.
+  const FIREBASE_LOADED = typeof firebase !== "undefined";
+  const CONFIG_SET = firebaseConfig.apiKey !== "YOUR_API_KEY";
+  const PREVIEW_MODE = !FIREBASE_LOADED || !CONFIG_SET;
+
+  let auth, googleProvider, db;
+  if (FIREBASE_LOADED) {
+    firebase.initializeApp(firebaseConfig);
+    auth = firebase.auth();
+    googleProvider = new firebase.auth.GoogleAuthProvider();
+    db = firebase.firestore();
+  }
+
+  // Shims so the app code below can use the same modular-style calls
+  function onAuthStateChanged(authObj, cb) {
+    if (PREVIEW_MODE) { cb({ uid: "preview-user", displayName: "Preview" }); return () => {}; }
+    return authObj.onAuthStateChanged(cb);
+  }
+  function signInWithPopup(authObj, provider) {
+    if (PREVIEW_MODE) return Promise.resolve();
+    return authObj.signInWithPopup(provider);
+  }
+  function signOut(authObj) {
+    if (PREVIEW_MODE) return Promise.resolve();
+    return authObj.signOut();
+  }
+  function doc(dbObj, ...path) {
+    let ref = dbObj;
+    for (let i = 0; i < path.length; i += 2) ref = ref.collection(path[i]).doc(path[i + 1]);
+    return ref;
+  }
+  let previewData = null;
+  async function getDoc(ref) {
+    if (PREVIEW_MODE) return { exists: () => previewData !== null, data: () => previewData };
+    const snap = await ref.get();
+    return { exists: () => snap.exists, data: () => snap.data() };
+  }
+  async function setDoc(ref, data) {
+    if (PREVIEW_MODE) { previewData = data; return; }
+    return ref.set(data);
+  }
+</script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useRef } = React;
+
+// ---- simple text/emoji stand-ins for icons (no icon library needed) ----
+const Plus = () => "+";
+const Trash2 = () => "🗑";
+const X = () => "✕";
+const ChevronDown = () => "▾";
+const ChevronRight = () => "▸";
+const ChevronLeft = () => "‹";
+const LayoutDashboard = () => "🏠";
+const CreditCard = () => "💳";
+const ArrowDownToLine = () => "⬇";
+const ArrowUpFromLine = () => "⬆";
+const Wallet = () => "👛";
+const Landmark = () => "🏦";
+const Check = () => "✓";
+const BarChart3 = () => "📊";
+const TrendingUp = () => "📈";
+const TrendingDown = () => "📉";
+const LogOut = () => "⎋";
+
+function SimpleYearChart({ monthly }) {
+  const max = Math.max(1, ...monthly.map((m) => Math.max(m.Income, m.Expense)));
+  return (
+    <div style={s.chartBox}>
+      <div style={{ display: "flex", alignItems: "flex-end", gap: 6, height: 160, padding: "0 4px" }}>
+        {monthly.map((m) => (
+          <div key={m.label} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+            <div style={{ display: "flex", alignItems: "flex-end", gap: 2, height: 130 }}>
+              <div title={fmt(m.Income)} style={{ width: 6, height: `${(m.Income / max) * 100}%`, background: "#4C9A82", borderRadius: "2px 2px 0 0", minHeight: m.Income > 0 ? 2 : 0 }} />
+              <div title={fmt(m.Expense)} style={{ width: 6, height: `${(m.Expense / max) * 100}%`, background: "#B85C4A", borderRadius: "2px 2px 0 0", minHeight: m.Expense > 0 ? 2 : 0 }} />
+            </div>
+            <span style={{ fontSize: 9.5, color: "#7C8698" }}>{m.label}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 14, justifyContent: "center", marginTop: 8, fontSize: 11, color: "#7C8698" }}>
+        <span><span style={{ display: "inline-block", width: 8, height: 8, background: "#4C9A82", borderRadius: 2, marginRight: 4 }} />Income</span>
+        <span><span style={{ display: "inline-block", width: 8, height: 8, background: "#B85C4A", borderRadius: 2, marginRight: 4 }} />Expense</span>
+      </div>
+    </div>
+  );
+}
+
+const fmt = (n) =>
+  new Intl.NumberFormat("en-AE", { style: "currency", currency: "AED", maximumFractionDigits: 0 }).format(Math.round(n || 0));
+const fmtDate = (iso) => {
+  if (!iso) return "—";
+  return new Date(iso + "T00:00:00").toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+};
+const daysUntil = (iso) => {
+  if (!iso) return null;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  return Math.round((new Date(iso + "T00:00:00") - today) / 86400000);
+};
+const uid = () => Math.random().toString(36).slice(2, 10);
+const todayISO = () => new Date().toISOString().slice(0, 10);
+const monthKey = (iso) => iso.slice(0, 7); // "2026-07"
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const INCOME_CATS = ["Salary", "Freelance", "Business", "Other"];
+const EXPENSE_CATS = ["Rent", "Food", "Transport", "Utilities", "Family Support", "Shopping", "Other"];
+
+const emptyState = {
+  accounts: [], cards: [], cardPayments: [],
+  peopleOwedMe: [], entriesOwedMe: [], peopleIOwe: [], entriesIOwe: [],
+  expenses: [], income: [], recurring: [], // {id, kind:'income'|'expense', amount, category, note, source|accountId}
+};
+
+function useAuthUser() {
+  const [user, setUser] = useState(undefined);
+  useEffect(() => onAuthStateChanged(auth, setUser), []);
+  return user;
+}
+
+function useStorage(uidStr) {
+  const [data, setData] = useState(emptyState);
+  const [loaded, setLoaded] = useState(false);
+  const saveTimer = useRef(null);
+  const docRef = FIREBASE_LOADED && !PREVIEW_MODE ? doc(db, "users", uidStr, "data", "moneyboard") : null;
+
+  useEffect(() => {
+    (async () => {
+      try {
+        if (docRef) {
+          const snap = await getDoc(docRef);
+          if (snap.exists()) setData({ ...emptyState, ...snap.data() });
+        }
+      } catch (e) { console.error("Load failed", e); }
+      setLoaded(true);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uidStr]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      if (docRef) setDoc(docRef, data).catch((e) => console.error("Save failed", e));
+    }, 500);
+    return () => clearTimeout(saveTimer.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, loaded]);
+
+  return [data, setData, loaded];
+}
+
+function LoginScreen() {
+  return (
+    <div style={s.page}>
+      <div style={{ ...s.wrap, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "80vh", gap: 16 }}>
+        <h1 style={s.h1}>Money Board</h1>
+        <p style={{ color: "#7C8698", textAlign: "center", fontSize: 14, maxWidth: 280 }}>Sign in to sync your debts, credits, cards and cashflow across devices.</p>
+        <button style={s.submitBtn} onClick={() => signInWithPopup(auth, googleProvider)}>Sign in with Google</button>
+      </div>
+    </div>
+  );
+}
+
+const bumpAccount = (accounts, id, delta) => accounts.map((a) => (a.id === id ? { ...a, balance: Number(a.balance || 0) + delta } : a));
+const bumpCardDue = (cards, id, delta) => cards.map((c) => (c.id === id ? { ...c, due: Number(c.due || 0) + delta } : c));
+
+function App() {
+  const user = useAuthUser();
+  if (user === undefined) return <div style={s.page}><div style={s.muted}>Loading…</div></div>;
+  if (user === null && !PREVIEW_MODE) return <LoginScreen />;
+  return <MoneyBoard user={user || { uid: "preview-user", displayName: "Preview" }} />;
+}
+
+function MoneyBoard({ user }) {
+  const [data, setData, loaded] = useStorage(user.uid);
+  const [tab, setTab] = useState("dashboard");
+  const patch = (updater) => setData((d) => ({ ...d, ...(typeof updater === "function" ? updater(d) : updater) }));
+
+  const totalCardDue = data.cards.reduce((s2, c) => s2 + Number(c.due || 0), 0);
+  const totalLimit = data.cards.reduce((s2, c) => s2 + Number(c.limit || 0), 0);
+  const totalBalance = data.accounts.reduce((s2, a) => s2 + Number(a.balance || 0), 0);
+  const totalOwedToMe = data.entriesOwedMe.filter((e) => !e.paid).reduce((s2, e) => s2 + Number(e.amount || 0), 0);
+  const totalIOwe = data.entriesIOwe.filter((e) => !e.paid).reduce((s2, e) => s2 + Number(e.amount || 0), 0);
+  const totalEarned = data.income.reduce((s2, e) => s2 + Number(e.amount || 0), 0);
+  const totalSpent = data.expenses.reduce((s2, e) => s2 + Number(e.amount || 0), 0);
+  const netWorth = totalBalance + totalOwedToMe - totalCardDue - totalIOwe;
+  const liquidNow = totalBalance - totalCardDue;
+
+  const tabs = [
+    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+    { id: "transactions", label: "Transactions", icon: Wallet },
+    { id: "wallet", label: "Wallet", icon: CreditCard },
+    { id: "people", label: "People", icon: ArrowDownToLine },
+    { id: "reports", label: "Reports", icon: BarChart3 },
+  ];
+
+  return (
+    <div style={s.page}>
+      <div style={s.wrap}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+          <h1 style={s.h1}>Money Board</h1>
+          {!PREVIEW_MODE && <button style={s.logoutBtn} onClick={() => signOut(auth)}><LogOut size={13} /> {user.displayName?.split(" ")[0] || "Sign out"}</button>}
+        </div>
+        {PREVIEW_MODE && (
+          <div style={{ background: "#3A241F", border: "1px solid #B85C4A", color: "#E8B4A8", fontSize: 12, borderRadius: 8, padding: "9px 12px", marginBottom: 14 }}>
+            Preview mode — nothing is saved yet. {typeof firebase === "undefined" ? "Firebase scripts didn't load (check your internet/network)." : "Add your Firebase keys at the top of this file, then re-upload, to save your data for real."}
+          </div>
+        )}
+        {!loaded ? <div style={s.muted}>Loading…</div> : (
+          <>
+            <nav style={s.tabRow}>
+              {tabs.map((t) => {
+                const Icon = t.icon; const active = tab === t.id;
+                return (
+                  <button key={t.id} onClick={() => setTab(t.id)} style={{ ...s.tabBtn, ...(active ? s.tabBtnActive : {}) }}>
+                    <Icon size={14} /> {t.label}
+                  </button>
+                );
+              })}
+            </nav>
+
+            {tab === "dashboard" && (
+              <Dashboard netWorth={netWorth} liquidNow={liquidNow} totalBalance={totalBalance} totalCardDue={totalCardDue}
+                totalLimit={totalLimit} totalOwedToMe={totalOwedToMe} totalIOwe={totalIOwe}
+                totalEarned={totalEarned} totalSpent={totalSpent} cards={data.cards} data={data} patch={patch} />
+            )}
+            {tab === "transactions" && <TransactionsTab data={data} patch={patch} />}
+            {tab === "wallet" && <WalletTab data={data} patch={patch} />}
+            {tab === "people" && <PeopleSection data={data} patch={patch} />}
+            {tab === "reports" && <ReportsTab data={data} setData={setData} />}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------- Dashboard ----------------
+function Dashboard({ netWorth, liquidNow, totalBalance, totalCardDue, totalLimit, totalOwedToMe, totalIOwe, totalEarned, totalSpent, cards, data, patch }) {
+  const upcoming = cards.filter((c) => c.dueDate).map((c) => ({ ...c, days: daysUntil(c.dueDate) })).sort((a, b) => a.days - b.days).slice(0, 3);
+  const thisMonth = monthKey(todayISO());
+  const pendingRecurring = data.recurring.filter((r) => {
+    const list = r.kind === "income" ? data.income : data.expenses;
+    return !list.some((e) => e.recurringId === r.id && monthKey(e.date) === thisMonth);
+  });
+
+  return (
+    <div>
+      <div style={s.netCard}>
+        <div style={s.netLabel}>Net worth</div>
+        <div style={{ ...s.netValue, color: netWorth >= 0 ? "#4C9A82" : "#B85C4A" }}>{fmt(netWorth)}</div>
+        <div style={s.netFormula}>accounts + owed to me − card due − I owe</div>
+      </div>
+      <div style={s.grid2}>
+        <MiniStat label="Cash + bank" value={fmt(totalBalance)} />
+        <MiniStat label="Liquid right now" value={fmt(liquidNow)} sub="cash+bank − card due" />
+        <MiniStat label="Card due" value={fmt(totalCardDue)} sub={totalLimit ? `of ${fmt(totalLimit)} limit` : null} />
+        <MiniStat label="Owed to me" value={fmt(totalOwedToMe)} />
+        <MiniStat label="I owe" value={fmt(totalIOwe)} />
+        <MiniStat label="Earned / Spent" value={`${fmt(totalEarned)} / ${fmt(totalSpent)}`} />
+      </div>
+      {pendingRecurring.length > 0 && (
+        <div style={{ marginTop: 14, background: "#1F3A32", border: "1px solid #2E5A4A", borderRadius: 10, padding: "10px 12px" }}>
+          <div style={{ fontSize: 12.5, color: "#4C9A82", marginBottom: 6 }}>{pendingRecurring.length} recurring item{pendingRecurring.length === 1 ? "" : "s"} not logged this month</div>
+          <button style={s.smallSolidBtn} onClick={() => logRecurringBatch(pendingRecurring, patch)}>Log all for {MONTH_NAMES[new Date().getMonth()]}</button>
+        </div>
+      )}
+      {upcoming.length > 0 && (
+        <div style={{ marginTop: 18 }}>
+          <div style={s.sectionTitle}>Upcoming card dues</div>
+          {upcoming.map((c) => (
+            <div key={c.id} style={s.dueRow}>
+              <span>{c.name}</span>
+              <span style={{ color: c.days < 0 ? "#B85C4A" : c.days <= 5 ? "#C6A15B" : "#7C8698" }}>
+                {c.days < 0 ? `${Math.abs(c.days)}d overdue` : c.days === 0 ? "Due today" : `in ${c.days}d`}
+              </span>
+              <span style={s.mono}>{fmt(c.due)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+function MiniStat({ label, value, sub }) {
+  return (
+    <div style={s.miniStat}>
+      <div style={s.miniLabel}>{label}</div>
+      <div style={s.miniValue}>{value}</div>
+      {sub && <div style={s.miniSub}>{sub}</div>}
+    </div>
+  );
+}
+
+function logRecurringBatch(items, patch) {
+  patch((d) => {
+    let accounts = d.accounts, cards = d.cards, expenses = [...d.expenses], income = [...d.income];
+    const today = todayISO();
+    items.forEach((r) => {
+      if (r.kind === "income") {
+        accounts = bumpAccount(accounts, r.accountId, r.amount);
+        income.push({ id: uid(), date: today, amount: r.amount, category: r.category, note: r.note, accountId: r.accountId, recurringId: r.id });
+      } else {
+        if (r.source.type === "account") accounts = bumpAccount(accounts, r.source.id, -r.amount);
+        else cards = bumpCardDue(cards, r.source.id, r.amount);
+        expenses.push({ id: uid(), date: today, amount: r.amount, category: r.category, note: r.note, source: r.source, recurringId: r.id });
+      }
+    });
+    return { accounts, cards, expenses, income };
+  });
+}
+
+// ---------------- Transactions (Expense + Income + Recurring) ----------------
+function TransactionsTab({ data, patch }) {
+  const [view, setView] = useState("all"); // 'all' | 'recurring'
+  const [showAdd, setShowAdd] = useState(false);
+  const [editEntry, setEditEntry] = useState(null); // {entry, kind}
+  const [showAddRecurring, setShowAddRecurring] = useState(false);
+
+  const accountName = (id) => data.accounts.find((a) => a.id === id)?.name || "—";
+  const cardName = (id) => data.cards.find((c) => c.id === id)?.name || "—";
+
+  const all = [
+    ...data.expenses.map((e) => ({ ...e, kind: "expense" })),
+    ...data.income.map((e) => ({ ...e, kind: "income" })),
+  ].sort((a, b) => new Date(b.date) - new Date(a.date));
+
+  const applyExpenseDelta = (accounts, cards, source, amount, sign) => {
+    if (source.type === "account") return { accounts: bumpAccount(accounts, source.id, sign * -amount), cards };
+    return { accounts, cards: bumpCardDue(cards, source.id, sign * amount) };
+  };
+
+  const addTx = (kind, v) => {
+    patch((d) => {
+      let accounts = d.accounts, cards = d.cards;
+      if (kind === "income") accounts = bumpAccount(accounts, v.accountId, v.amount);
+      else ({ accounts, cards } = applyExpenseDelta(accounts, cards, v.source, v.amount, 1));
+      const key = kind === "income" ? "income" : "expenses";
+      return { accounts, cards, [key]: [...d[key], { id: uid(), ...v }] };
+    });
+    setShowAdd(false);
+  };
+
+  const saveEdit = (kind, original, updated) => {
+    patch((d) => {
+      let accounts = d.accounts, cards = d.cards;
+      // reverse original effect
+      if (kind === "income") accounts = bumpAccount(accounts, original.accountId, -original.amount);
+      else ({ accounts, cards } = applyExpenseDelta(accounts, cards, original.source, original.amount, -1));
+      // apply new effect
+      if (kind === "income") accounts = bumpAccount(accounts, updated.accountId, updated.amount);
+      else ({ accounts, cards } = applyExpenseDelta(accounts, cards, updated.source, updated.amount, 1));
+      const key = kind === "income" ? "income" : "expenses";
+      return { accounts, cards, [key]: d[key].map((x) => (x.id === original.id ? { ...updated, id: original.id, recurringId: original.recurringId } : x)) };
+    });
+    setEditEntry(null);
+  };
+
+  const removeTx = (entry) => {
+    patch((d) => {
+      let accounts = d.accounts, cards = d.cards;
+      if (entry.kind === "income") accounts = bumpAccount(accounts, entry.accountId, -entry.amount);
+      else ({ accounts, cards } = applyExpenseDelta(accounts, cards, entry.source, entry.amount, -1));
+      const key = entry.kind === "income" ? "income" : "expenses";
+      return { accounts, cards, [key]: d[key].filter((x) => x.id !== entry.id) };
+    });
+  };
+
+  const addRecurring = (r) => { patch({ recurring: [...data.recurring, { id: uid(), ...r }] }); setShowAddRecurring(false); };
+  const removeRecurring = (id) => patch({ recurring: data.recurring.filter((r) => r.id !== id) });
+
+  return (
+    <div>
+      <div style={{ ...s.toggleRow, marginBottom: 12 }}>
+        <button style={{ ...s.toggleBtn, ...(view === "all" ? s.toggleActiveIncome : {}) }} onClick={() => setView("all")}>All transactions</button>
+        <button style={{ ...s.toggleBtn, ...(view === "recurring" ? s.toggleActiveIncome : {}) }} onClick={() => setView("recurring")}>Recurring</button>
+      </div>
+
+      {view === "all" ? (
+        <>
+          <RowHead title="Transactions" onAdd={() => setShowAdd(true)} addLabel="Add" />
+          {all.length === 0 && <Empty text="No transactions yet." />}
+          {all.map((e) => (
+            <div key={e.kind + e.id} style={s.flowRow} onClick={() => setEditEntry({ entry: e, kind: e.kind })}>
+              <div style={{ flex: 1 }}>
+                <div style={s.cardName}>{e.category}{e.recurringId ? " ↻" : ""}</div>
+                <div style={s.cardSub}>{fmtDate(e.date)} · {e.kind === "income" ? accountName(e.accountId) : e.source.type === "card" ? cardName(e.source.id) + " (card)" : accountName(e.source.id)}{e.note ? ` · ${e.note}` : ""}</div>
+              </div>
+              <div style={{ ...s.mono, color: e.kind === "income" ? "#4C9A82" : "#B85C4A" }}>{e.kind === "income" ? "+" : "-"}{fmt(e.amount)}</div>
+              <button style={s.iconDeleteBtn} onClick={(ev) => { ev.stopPropagation(); removeTx(e); }}><Trash2 size={13} /></button>
+            </div>
+          ))}
+          {showAdd && (
+            <Modal title="Add transaction" onClose={() => setShowAdd(false)}>
+              <TxForm accounts={data.accounts} cards={data.cards} onSave={addTx} />
+            </Modal>
+          )}
+          {editEntry && (
+            <Modal title="Edit transaction" onClose={() => setEditEntry(null)}>
+              <TxForm accounts={data.accounts} cards={data.cards} initial={editEntry.entry} initialKind={editEntry.kind}
+                onSave={(kind, v) => saveEdit(kind, editEntry.entry, v)} />
+            </Modal>
+          )}
+        </>
+      ) : (
+        <>
+          <RowHead title="Recurring items" onAdd={() => setShowAddRecurring(true)} addLabel="Add recurring" />
+          <div style={{ fontSize: 11.5, color: "#5C6478", marginBottom: 10 }}>These don't log automatically — use "Log all" on the Dashboard each month to add them.</div>
+          {data.recurring.length === 0 && <Empty text="No recurring items yet." />}
+          {data.recurring.map((r) => (
+            <div key={r.id} style={s.flowRow}>
+              <div style={{ flex: 1 }}>
+                <div style={s.cardName}>{r.category}</div>
+                <div style={s.cardSub}>{r.kind === "income" ? accountName(r.accountId) : r.source.type === "card" ? cardName(r.source.id) + " (card)" : accountName(r.source.id)}{r.note ? ` · ${r.note}` : ""}</div>
+              </div>
+              <div style={{ ...s.mono, color: r.kind === "income" ? "#4C9A82" : "#B85C4A" }}>{r.kind === "income" ? "+" : "-"}{fmt(r.amount)}</div>
+              <button style={s.iconDeleteBtn} onClick={() => removeRecurring(r.id)}><Trash2 size={13} /></button>
+            </div>
+          ))}
+          {showAddRecurring && (
+            <Modal title="Add recurring item" onClose={() => setShowAddRecurring(false)}>
+              <TxForm accounts={data.accounts} cards={data.cards} recurringMode onSave={(kind, v) => addRecurring({ kind, ...v })} />
+            </Modal>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function TxForm({ accounts, cards, initial, initialKind, recurringMode, onSave }) {
+  const [kind, setKind] = useState(initialKind || "expense");
+  const [amount, setAmount] = useState(initial ? String(initial.amount) : "");
+  const [date, setDate] = useState(initial ? initial.date : todayISO());
+  const [category, setCategory] = useState(initial ? initial.category : EXPENSE_CATS[0]);
+  const [note, setNote] = useState(initial ? initial.note || "" : "");
+  const expenseOptions = [...accounts.map((a) => ({ key: `account:${a.id}`, label: `${a.name} (${fmt(a.balance)})` })), ...cards.map((c) => ({ key: `card:${c.id}`, label: `${c.name} (card)` }))];
+  const initialSourceKey = initial && initialKind === "expense" ? `${initial.source.type}:${initial.source.id}` : expenseOptions[0]?.key || "";
+  const [sourceKey, setSourceKey] = useState(initialSourceKey);
+  const [accountId, setAccountId] = useState(initial && initialKind === "income" ? initial.accountId : accounts[0]?.id || "");
+
+  useEffect(() => {
+    if (!initial) setCategory((kind === "income" ? INCOME_CATS : EXPENSE_CATS)[0]);
+  }, [kind]);
+
+  const cats = kind === "income" ? INCOME_CATS : EXPENSE_CATS;
+  const needsDest = kind === "income" ? accounts.length > 0 : expenseOptions.length > 0;
+  if (!needsDest) return <Empty text={kind === "income" ? "Add a bank or cash account first, under Wallet." : "Add a bank/cash account or a card first, under Wallet."} />;
+
+  const valid = amount !== "" && (recurringMode || date) && category && (kind === "income" ? accountId : sourceKey);
+  const submit = () => {
+    if (!valid) return;
+    if (kind === "income") onSave("income", { amount: Number(amount), date: recurringMode ? undefined : date, category, note: note.trim(), accountId });
+    else {
+      const [type, id] = sourceKey.split(":");
+      onSave("expense", { amount: Number(amount), date: recurringMode ? undefined : date, category, note: note.trim(), source: { type, id } });
+    }
+  };
+
+  return (
+    <FormShell onSubmit={submit} valid={valid} submitLabel={initial ? "Save changes" : recurringMode ? "Save recurring item" : "Save transaction"}>
+      {!initial && (
+        <Field label="Type">
+          <div style={s.toggleRow}>
+            <button type="button" style={{ ...s.toggleBtn, ...(kind === "income" ? s.toggleActiveIncome : {}) }} onClick={() => setKind("income")}>Income</button>
+            <button type="button" style={{ ...s.toggleBtn, ...(kind === "expense" ? s.toggleActiveExpense : {}) }} onClick={() => setKind("expense")}>Expense</button>
+          </div>
+        </Field>
+      )}
+      <Field label="Amount (AED)"><input style={s.input} type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="500" autoFocus /></Field>
+      {!recurringMode && <Field label="Date"><input style={s.input} type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>}
+      <Field label="Category">
+        <select style={s.input} value={category} onChange={(e) => setCategory(e.target.value)}>
+          {cats.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+      </Field>
+      {kind === "income" ? (
+        <Field label="Deposit into">
+          <select style={s.input} value={accountId} onChange={(e) => setAccountId(e.target.value)}>
+            {accounts.map((a) => <option key={a.id} value={a.id}>{a.name} ({fmt(a.balance)})</option>)}
+          </select>
+        </Field>
+      ) : (
+        <Field label="Paid with">
+          <select style={s.input} value={sourceKey} onChange={(e) => setSourceKey(e.target.value)}>
+            {expenseOptions.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+          </select>
+        </Field>
+      )}
+      <Field label="Note (optional)"><input style={s.input} value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. groceries" /></Field>
+    </FormShell>
+  );
+}
+
+// ---------------- Wallet (Cards + Accounts) ----------------
+function WalletTab({ data, patch }) {
+  const [section, setSection] = useState("cards");
+  return (
+    <div>
+      <div style={{ ...s.toggleRow, marginBottom: 12 }}>
+        <button style={{ ...s.toggleBtn, ...(section === "cards" ? s.toggleActiveIncome : {}) }} onClick={() => setSection("cards")}>Credit cards</button>
+        <button style={{ ...s.toggleBtn, ...(section === "accounts" ? s.toggleActiveIncome : {}) }} onClick={() => setSection("accounts")}>Bank & cash</button>
+      </div>
+      {section === "cards" ? <CardsTab data={data} patch={patch} /> : <AccountsTab data={data} patch={patch} />}
+    </div>
+  );
+}
+
+function CardsTab({ data, patch }) {
+  const [showAddCard, setShowAddCard] = useState(false);
+  const [editCard, setEditCard] = useState(null);
+  const [expanded, setExpanded] = useState(null);
+  const [payFor, setPayFor] = useState(null);
+
+  const removeCard = (id) => {
+    patch({
+      cards: data.cards.filter((c) => c.id !== id),
+      cardPayments: data.cardPayments.filter((p) => p.cardId !== id),
+      expenses: data.expenses.filter((e) => !(e.source.type === "card" && e.source.id === id)),
+    });
+  };
+  const saveCard = (v) => {
+    if (editCard) patch({ cards: data.cards.map((c) => (c.id === editCard.id ? { ...c, name: v.name, limit: v.limit, dueDate: v.dueDate } : c)) });
+    else patch({ cards: [...data.cards, { id: uid(), due: 0, ...v }] });
+    setShowAddCard(false); setEditCard(null);
+  };
+  const logPayment = (cardId, { amount, date, accountId }) => {
+    patch((d) => ({
+      cards: bumpCardDue(d.cards, cardId, -amount),
+      accounts: bumpAccount(d.accounts, accountId, -amount),
+      cardPayments: [...d.cardPayments, { id: uid(), cardId, accountId, amount, date }],
+    }));
+    setPayFor(null);
+  };
+  const deletePayment = (p) => {
+    patch((d) => ({
+      cards: bumpCardDue(d.cards, p.cardId, p.amount),
+      accounts: bumpAccount(d.accounts, p.accountId, p.amount),
+      cardPayments: d.cardPayments.filter((x) => x.id !== p.id),
+    }));
+  };
+
+  return (
+    <div>
+      <RowHead title="Credit cards" onAdd={() => setShowAddCard(true)} addLabel="Add card" />
+      {data.cards.length === 0 && <Empty text="No cards yet." />}
+      {data.cards.map((c) => {
+        const charges = data.expenses.filter((e) => e.source.type === "card" && e.source.id === c.id).map((e) => ({ ...e, kind: "charge" }));
+        const payments = data.cardPayments.filter((p) => p.cardId === c.id).map((p) => ({ ...p, kind: "payment" }));
+        const history = [...charges, ...payments].sort((a, b) => new Date(b.date) - new Date(a.date));
+        const isOpen = expanded === c.id;
+        const days = c.dueDate ? daysUntil(c.dueDate) : null;
+        return (
+          <div key={c.id} style={s.card}>
+            <div style={s.cardRow} onClick={() => setExpanded(isOpen ? null : c.id)}>
+              {isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+              <div style={{ flex: 1 }}>
+                <div style={s.cardName}>{c.name}</div>
+                <div style={s.cardSub}>Limit {fmt(c.limit)}</div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div style={s.mono}>{fmt(c.due)}</div>
+                {days !== null && <div style={{ fontSize: 11, color: days < 0 ? "#B85C4A" : days <= 5 ? "#C6A15B" : "#7C8698" }}>{days < 0 ? `overdue ${Math.abs(days)}d` : `due ${fmtDate(c.dueDate)}`}</div>}
+              </div>
+              <button style={s.iconDeleteBtn} onClick={(e) => { e.stopPropagation(); removeCard(c.id); }}><Trash2 size={13} /></button>
+            </div>
+            {isOpen && (
+              <div style={s.cardBody}>
+                <div style={{ display: "flex", gap: 12 }}>
+                  <button style={s.smallAddBtn} onClick={() => setPayFor(c.id)}><Plus size={13} /> Log payment</button>
+                  <button style={{ ...s.smallAddBtn, color: "#8B93A3" }} onClick={() => setEditCard(c)}>Edit card</button>
+                </div>
+                {history.length === 0 ? <Empty text="No charges or payments yet." /> : history.map((h) => (
+                  <div key={h.id} style={s.historyRow}>
+                    <span style={{ color: h.kind === "payment" ? "#4C9A82" : "#8B93A3", fontSize: 11 }}>{h.kind === "payment" ? "Paid" : h.category}</span>
+                    <span>{fmtDate(h.date)}</span>
+                    <span style={{ ...s.mono, marginLeft: "auto", color: h.kind === "payment" ? "#4C9A82" : "#B85C4A" }}>{h.kind === "payment" ? "-" : "+"}{fmt(h.amount)}</span>
+                    {h.kind === "payment" && <button style={s.rowDelete} onClick={() => deletePayment(h)}><Trash2 size={12} /></button>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+      {(showAddCard || editCard) && (
+        <Modal title={editCard ? "Edit card" : "Add credit card"} onClose={() => { setShowAddCard(false); setEditCard(null); }}>
+          <CardForm initial={editCard} onSave={saveCard} />
+        </Modal>
+      )}
+      {payFor && (
+        <Modal title="Pay this card" onClose={() => setPayFor(null)}>
+          <PayCardForm accounts={data.accounts} onSave={(v) => logPayment(payFor, v)} />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function CardForm({ initial, onSave }) {
+  const [name, setName] = useState(initial?.name || "");
+  const [limit, setLimit] = useState(initial ? String(initial.limit) : "");
+  const [due, setDue] = useState(initial ? String(initial.due) : "");
+  const [dueDate, setDueDate] = useState(initial?.dueDate || "");
+  const valid = name.trim() && limit !== "";
+  return (
+    <FormShell onSubmit={() => valid && onSave({ name: name.trim(), limit: Number(limit), due: Number(due || 0), dueDate })} valid={valid} submitLabel={initial ? "Save changes" : "Save card"}>
+      <Field label="Card name"><input style={s.input} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Emirates NBD Titanium" autoFocus /></Field>
+      <Field label="Credit limit (AED)"><input style={s.input} type="number" value={limit} onChange={(e) => setLimit(e.target.value)} placeholder="10000" /></Field>
+      {!initial && <Field label="Current outstanding balance (AED, if any)"><input style={s.input} type="number" value={due} onChange={(e) => setDue(e.target.value)} placeholder="0" /></Field>}
+      <Field label="Next due date (optional)"><input style={s.input} type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} /></Field>
+    </FormShell>
+  );
+}
+function PayCardForm({ accounts, onSave }) {
+  const [amount, setAmount] = useState(""); const [date, setDate] = useState(todayISO()); const [accountId, setAccountId] = useState(accounts[0]?.id || "");
+  if (accounts.length === 0) return <Empty text="Add a bank or cash account first." />;
+  const valid = amount !== "" && date && accountId;
+  return (
+    <FormShell onSubmit={() => valid && onSave({ amount: Number(amount), date, accountId })} valid={valid} submitLabel="Log payment">
+      <Field label="Amount paid (AED)"><input style={s.input} type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="1200" autoFocus /></Field>
+      <Field label="Date"><input style={s.input} type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+      <Field label="Paid from">
+        <select style={s.input} value={accountId} onChange={(e) => setAccountId(e.target.value)}>
+          {accounts.map((a) => <option key={a.id} value={a.id}>{a.name} ({fmt(a.balance)})</option>)}
+        </select>
+      </Field>
+    </FormShell>
+  );
+}
+
+function AccountsTab({ data, patch }) {
+  const [showAdd, setShowAdd] = useState(false);
+  const [editAcc, setEditAcc] = useState(null);
+  const saveAccount = (v) => {
+    if (editAcc) patch({ accounts: data.accounts.map((a) => (a.id === editAcc.id ? { ...a, name: v.name, kind: v.kind } : a)) });
+    else patch({ accounts: [...data.accounts, { id: uid(), ...v }] });
+    setShowAdd(false); setEditAcc(null);
+  };
+  return (
+    <div>
+      <RowHead title="Bank & cash accounts" onAdd={() => setShowAdd(true)} addLabel="Add account" />
+      {data.accounts.length === 0 && <Empty text="No accounts yet. Add one — expenses, income, card payments, and settled debts all connect to it." />}
+      {data.accounts.map((a) => (
+        <div key={a.id} style={s.flowRow}>
+          <div style={{ flex: 1, cursor: "pointer" }} onClick={() => setEditAcc(a)}>
+            <div style={s.cardName}>{a.name}</div>
+            <div style={s.cardSub}>{a.kind}</div>
+          </div>
+          <div style={s.mono}>{fmt(a.balance)}</div>
+          <button style={s.iconDeleteBtn} onClick={() => patch({ accounts: data.accounts.filter((x) => x.id !== a.id) })}><Trash2 size={13} /></button>
+        </div>
+      ))}
+      <div style={{ fontSize: 11.5, color: "#5C6478", marginTop: 8 }}>Tap an account to rename it. Balances update automatically from transactions.</div>
+      {(showAdd || editAcc) && (
+        <Modal title={editAcc ? "Edit account" : "Add account"} onClose={() => { setShowAdd(false); setEditAcc(null); }}>
+          <AccountForm initial={editAcc} onSave={saveAccount} />
+        </Modal>
+      )}
+    </div>
+  );
+}
+function AccountForm({ initial, onSave }) {
+  const [name, setName] = useState(initial?.name || ""); const [kind, setKind] = useState(initial?.kind || "Bank"); const [balance, setBalance] = useState(initial ? String(initial.balance) : "");
+  const valid = name.trim() && (initial || balance !== "");
+  return (
+    <FormShell onSubmit={() => valid && onSave({ name: name.trim(), kind, balance: initial ? initial.balance : Number(balance) })} valid={valid} submitLabel={initial ? "Save changes" : "Save account"}>
+      <Field label="Account name"><input style={s.input} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. ENBD Savings" autoFocus /></Field>
+      <Field label="Type">
+        <div style={s.toggleRow}>
+          <button type="button" style={{ ...s.toggleBtn, ...(kind === "Bank" ? s.toggleActiveIncome : {}) }} onClick={() => setKind("Bank")}>Bank</button>
+          <button type="button" style={{ ...s.toggleBtn, ...(kind === "Cash" ? s.toggleActiveIncome : {}) }} onClick={() => setKind("Cash")}>Cash</button>
+        </div>
+      </Field>
+      {!initial && <Field label="Current balance (AED)"><input style={s.input} type="number" value={balance} onChange={(e) => setBalance(e.target.value)} placeholder="5000" /></Field>}
+      {initial && <div style={{ fontSize: 11.5, color: "#5C6478", marginBottom: 12 }}>Balance ({fmt(initial.balance)}) updates automatically from transactions and can't be edited directly here.</div>}
+    </FormShell>
+  );
+}
+
+// ---------------- People ----------------
+function PeopleSection({ data, patch }) {
+  const [kind, setKind] = useState("owedMe");
+  return (
+    <div>
+      <div style={{ ...s.toggleRow, marginBottom: 12 }}>
+        <button style={{ ...s.toggleBtn, ...(kind === "owedMe" ? s.toggleActiveIncome : {}) }} onClick={() => setKind("owedMe")}>Owed to me</button>
+        <button style={{ ...s.toggleBtn, ...(kind === "iOwe" ? s.toggleActiveExpense : {}) }} onClick={() => setKind("iOwe")}>I owe</button>
+      </div>
+      <PeopleTab title={kind === "owedMe" ? "Owed to me" : "I owe"} tone={kind === "owedMe" ? "#4C9A82" : "#B85C4A"} kind={kind} data={data} patch={patch} />
+    </div>
+  );
+}
+
+function PeopleTab({ title, tone, kind, data, patch }) {
+  const peopleKey = kind === "owedMe" ? "peopleOwedMe" : "peopleIOwe";
+  const entriesKey = kind === "owedMe" ? "entriesOwedMe" : "entriesIOwe";
+  const people = data[peopleKey]; const entries = data[entriesKey];
+  const [showAddPerson, setShowAddPerson] = useState(false);
+  const [editPerson, setEditPerson] = useState(null);
+  const [addEntryFor, setAddEntryFor] = useState(null);
+  const [editEntry, setEditEntry] = useState(null);
+  const [payEntry, setPayEntry] = useState(null);
+  const [expanded, setExpanded] = useState(null);
+
+  const removePerson = (id) => patch({ [peopleKey]: people.filter((p) => p.id !== id), [entriesKey]: entries.filter((e) => e.personId !== id) });
+  const savePerson = (name) => {
+    if (editPerson) patch({ [peopleKey]: people.map((p) => (p.id === editPerson.id ? { ...p, name } : p)) });
+    else patch({ [peopleKey]: [...people, { id: uid(), name }] });
+    setShowAddPerson(false); setEditPerson(null);
+  };
+
+  const addEntry = (personId, v) => {
+    patch((d) => {
+      let accounts = d.accounts;
+      if (v.sourceAccountId) accounts = bumpAccount(accounts, v.sourceAccountId, kind === "owedMe" ? -v.amount : v.amount);
+      return { accounts, [entriesKey]: [...d[entriesKey], { id: uid(), personId, paid: false, ...v }] };
+    });
+    setAddEntryFor(null);
+  };
+  const saveEntryEdit = (original, updated) => {
+    patch((d) => {
+      let accounts = d.accounts;
+      if (original.sourceAccountId) accounts = bumpAccount(accounts, original.sourceAccountId, kind === "owedMe" ? original.amount : -original.amount);
+      if (updated.sourceAccountId) accounts = bumpAccount(accounts, updated.sourceAccountId, kind === "owedMe" ? -updated.amount : updated.amount);
+      return { accounts, [entriesKey]: d[entriesKey].map((x) => (x.id === original.id ? { ...x, amount: updated.amount, date: updated.date, details: updated.details, sourceAccountId: updated.sourceAccountId } : x)) };
+    });
+    setEditEntry(null);
+  };
+  const markPaid = (entry, accountId) => {
+    const delta = kind === "owedMe" ? entry.amount : -entry.amount;
+    patch((d) => ({
+      accounts: bumpAccount(d.accounts, accountId, delta),
+      [entriesKey]: d[entriesKey].map((e) => (e.id === entry.id ? { ...e, paid: true, paidAccountId: accountId, paidDate: todayISO() } : e)),
+    }));
+    setPayEntry(null);
+  };
+  const removeEntry = (entry) => {
+    patch((d) => {
+      let accounts = d.accounts;
+      if (entry.paid && entry.paidAccountId) accounts = bumpAccount(accounts, entry.paidAccountId, kind === "owedMe" ? -entry.amount : entry.amount);
+      else if (!entry.paid && entry.sourceAccountId) accounts = bumpAccount(accounts, entry.sourceAccountId, kind === "owedMe" ? entry.amount : -entry.amount);
+      return { accounts, [entriesKey]: d[entriesKey].filter((x) => x.id !== entry.id) };
+    });
+  };
+
+  return (
+    <div>
+      <RowHead title={title} onAdd={() => setShowAddPerson(true)} addLabel="Add person" />
+      {people.length === 0 && <Empty text="No one added yet." />}
+      {people.map((p) => {
+        const personEntries = entries.filter((e) => e.personId === p.id).sort((a, b) => new Date(b.date) - new Date(a.date));
+        const outstanding = personEntries.filter((e) => !e.paid).reduce((sum, e) => sum + Number(e.amount || 0), 0);
+        const isOpen = expanded === p.id;
+        const accountName = (id) => data.accounts.find((a) => a.id === id)?.name;
+        return (
+          <div key={p.id} style={s.card}>
+            <div style={s.cardRow} onClick={() => setExpanded(isOpen ? null : p.id)}>
+              {isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+              <div style={{ flex: 1 }} onClick={(e) => { e.stopPropagation(); setEditPerson(p); }}>
+                <div style={s.cardName}>{p.name}</div>
+                <div style={s.cardSub}>{personEntries.length} entr{personEntries.length === 1 ? "y" : "ies"}</div>
+              </div>
+              <div style={{ ...s.mono, color: tone }}>{fmt(outstanding)}</div>
+              <button style={s.iconDeleteBtn} onClick={(e) => { e.stopPropagation(); removePerson(p.id); }}><Trash2 size={13} /></button>
+            </div>
+            {isOpen && (
+              <div style={s.cardBody}>
+                <button style={s.smallAddBtn} onClick={() => setAddEntryFor(p.id)}><Plus size={13} /> Add entry</button>
+                {personEntries.length === 0 ? <Empty text="No entries yet." /> : personEntries.map((e) => (
+                  <div key={e.id} style={s.historyRow} onClick={() => !e.paid && setEditEntry(e)}>
+                    <span style={{ textDecoration: e.paid ? "line-through" : "none", color: e.paid ? "#5C6478" : "#EAEBEF" }}>{fmtDate(e.date)}</span>
+                    <span style={{ flex: 1, color: "#7C8698", fontSize: 12, textDecoration: e.paid ? "line-through" : "none" }}>
+                      {e.details}{e.sourceAccountId ? `${e.details ? " · " : ""}via ${accountName(e.sourceAccountId) || "account"}` : ""}
+                    </span>
+                    <span style={{ ...s.mono, color: e.paid ? "#5C6478" : tone }}>{fmt(e.amount)}</span>
+                    {!e.paid ? <button style={s.payBtn} onClick={(ev) => { ev.stopPropagation(); setPayEntry(e); }}><Check size={11} /> Paid</button> : <span style={{ fontSize: 10.5, color: "#4C9A82" }}>settled</span>}
+                    <button style={s.rowDelete} onClick={(ev) => { ev.stopPropagation(); removeEntry(e); }}><Trash2 size={12} /></button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+      {(showAddPerson || editPerson) && (
+        <Modal title={editPerson ? "Edit person" : "Add person"} onClose={() => { setShowAddPerson(false); setEditPerson(null); }}>
+          <PersonForm initial={editPerson?.name} onSave={savePerson} />
+        </Modal>
+      )}
+      {addEntryFor && (
+        <Modal title="Add entry" onClose={() => setAddEntryFor(null)}>
+          <PersonEntryForm accounts={data.accounts} kind={kind} onSave={(v) => addEntry(addEntryFor, v)} />
+        </Modal>
+      )}
+      {editEntry && (
+        <Modal title="Edit entry" onClose={() => setEditEntry(null)}>
+          <PersonEntryForm accounts={data.accounts} kind={kind} initial={editEntry} onSave={(v) => saveEntryEdit(editEntry, v)} />
+        </Modal>
+      )}
+      {payEntry && (
+        <Modal title={kind === "owedMe" ? "Mark as paid to you" : "Mark as paid by you"} onClose={() => setPayEntry(null)}>
+          <MarkPaidForm accounts={data.accounts} label={kind === "owedMe" ? "Deposit into" : "Pay from"} onSave={(accountId) => markPaid(payEntry, accountId)} />
+        </Modal>
+      )}
+    </div>
+  );
+}
+function PersonForm({ initial, onSave }) {
+  const [name, setName] = useState(initial || ""); const valid = name.trim();
+  return <FormShell onSubmit={() => valid && onSave(name.trim())} valid={valid} submitLabel="Save">
+    <Field label="Name"><input style={s.input} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Ravi" autoFocus /></Field>
+  </FormShell>;
+}
+function PersonEntryForm({ accounts, kind, initial, onSave }) {
+  const [amount, setAmount] = useState(initial ? String(initial.amount) : "");
+  const [date, setDate] = useState(initial ? initial.date : todayISO());
+  const [details, setDetails] = useState(initial?.details || "");
+  const [sourceAccountId, setSourceAccountId] = useState(initial?.sourceAccountId || "");
+  const valid = amount !== "" && date;
+  const verb = kind === "owedMe" ? "gave them" : "received from them";
+  return (
+    <FormShell onSubmit={() => valid && onSave({ amount: Number(amount), date, details: details.trim(), sourceAccountId: sourceAccountId || null })} valid={valid} submitLabel={initial ? "Save changes" : "Save entry"}>
+      <Field label="Amount (AED)"><input style={s.input} type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="500" autoFocus /></Field>
+      <Field label="Date"><input style={s.input} type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+      <Field label={`Money ${verb} from`}>
+        <select style={s.input} value={sourceAccountId} onChange={(e) => setSourceAccountId(e.target.value)}>
+          <option value="">Just record the balance (existing debt, no account change)</option>
+          {accounts.map((a) => <option key={a.id} value={a.id}>{a.name} ({fmt(a.balance)})</option>)}
+        </select>
+      </Field>
+      <Field label="Details (optional)"><input style={s.input} value={details} onChange={(e) => setDetails(e.target.value)} placeholder="e.g. lent for rent" /></Field>
+    </FormShell>
+  );
+}
+function MarkPaidForm({ accounts, label, onSave }) {
+  const [accountId, setAccountId] = useState(accounts[0]?.id || "");
+  if (accounts.length === 0) return <Empty text="Add a bank or cash account first, under Wallet." />;
+  return (
+    <FormShell onSubmit={() => accountId && onSave(accountId)} valid={!!accountId} submitLabel="Confirm settled">
+      <Field label={label}>
+        <select style={s.input} value={accountId} onChange={(e) => setAccountId(e.target.value)}>
+          {accounts.map((a) => <option key={a.id} value={a.id}>{a.name} ({fmt(a.balance)})</option>)}
+        </select>
+      </Field>
+    </FormShell>
+  );
+}
+
+// ---------------- Reports ----------------
+function ReportsTab({ data, setData }) {
+  const [mode, setMode] = useState("monthly");
+  const now = new Date();
+  const [year, setYear] = useState(now.getFullYear());
+  const [month, setMonth] = useState(now.getMonth());
+  const fileInputRef = useRef(null);
+
+  const exportData = () => {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `money-board-backup-${todayISO()}.json`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+  const importData = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const parsed = JSON.parse(ev.target.result);
+        if (confirm("This will replace all current data with the backup file. Continue?")) {
+          setData({ ...emptyState, ...parsed });
+        }
+      } catch (err) { alert("Couldn't read that file — make sure it's a Money Board backup JSON."); }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
+  const byCategory = (entries) => {
+    const map = {};
+    entries.forEach((e) => { map[e.category] = (map[e.category] || 0) + Number(e.amount || 0); });
+    return Object.entries(map).sort((a, b) => b[1] - a[1]);
+  };
+  const inPeriod = (list, y, m) => list.filter((e) => {
+    const d = new Date(e.date + "T00:00:00");
+    return d.getFullYear() === y && (m === null || d.getMonth() === m);
+  });
+
+  const dataButtons = (
+    <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+      <button style={s.smallSolidBtn} onClick={exportData}>Export backup</button>
+      <button style={{ ...s.smallSolidBtn, background: "#242B38", color: "#EAEBEF" }} onClick={() => fileInputRef.current.click()}>Import backup</button>
+      <input ref={fileInputRef} type="file" accept="application/json" style={{ display: "none" }} onChange={importData} />
+    </div>
+  );
+
+  if (mode === "monthly") {
+    const inc = inPeriod(data.income, year, month);
+    const exp = inPeriod(data.expenses, year, month);
+    const income = inc.reduce((s2, e) => s2 + Number(e.amount || 0), 0);
+    const expense = exp.reduce((s2, e) => s2 + Number(e.amount || 0), 0);
+    const shiftMonth = (d) => { let m = month + d, y = year; if (m < 0) { m = 11; y--; } if (m > 11) { m = 0; y++; } setMonth(m); setYear(y); };
+    return (
+      <div>
+        {dataButtons}
+        <ModeToggle mode={mode} setMode={setMode} />
+        <div style={s.periodNav}>
+          <button style={s.navBtn} onClick={() => shiftMonth(-1)}><ChevronLeft size={16} /></button>
+          <span style={s.periodLabel}>{MONTH_NAMES[month]} {year}</span>
+          <button style={s.navBtn} onClick={() => shiftMonth(1)}><ChevronRight size={16} /></button>
+        </div>
+        <div style={s.grid2}><MiniStat label="Earned" value={fmt(income)} /><MiniStat label="Spent" value={fmt(expense)} /></div>
+        <div style={{ ...s.netCard, marginTop: 8 }}>
+          <div style={s.netLabel}>Net this month</div>
+          <div style={{ ...s.netValue, color: income - expense >= 0 ? "#4C9A82" : "#B85C4A" }}>{fmt(income - expense)}</div>
+        </div>
+        <CategoryBlock title="Income by category" tone="#4C9A82" cats={byCategory(inc)} />
+        <CategoryBlock title="Expense by category" tone="#B85C4A" cats={byCategory(exp)} />
+        <CardSpendBlock cards={data.cards} expenses={exp} />
+      </div>
+    );
+  }
+
+  const inc = inPeriod(data.income, year, null);
+  const exp = inPeriod(data.expenses, year, null);
+  const income = inc.reduce((s2, e) => s2 + Number(e.amount || 0), 0);
+  const expense = exp.reduce((s2, e) => s2 + Number(e.amount || 0), 0);
+  const monthly = MONTH_NAMES.map((label, i) => ({
+    label,
+    Income: inc.filter((e) => new Date(e.date + "T00:00:00").getMonth() === i).reduce((s2, e) => s2 + Number(e.amount || 0), 0),
+    Expense: exp.filter((e) => new Date(e.date + "T00:00:00").getMonth() === i).reduce((s2, e) => s2 + Number(e.amount || 0), 0),
+  }));
+
+  return (
+    <div>
+      {dataButtons}
+      <ModeToggle mode={mode} setMode={setMode} />
+      <div style={s.periodNav}>
+        <button style={s.navBtn} onClick={() => setYear(year - 1)}><ChevronLeft size={16} /></button>
+        <span style={s.periodLabel}>{year}</span>
+        <button style={s.navBtn} onClick={() => setYear(year + 1)}><ChevronRight size={16} /></button>
+      </div>
+      <div style={s.grid2}><MiniStat label="Earned" value={fmt(income)} /><MiniStat label="Spent" value={fmt(expense)} /></div>
+      <div style={{ ...s.netCard, marginTop: 8 }}>
+        <div style={s.netLabel}>Net this year</div>
+        <div style={{ ...s.netValue, color: income - expense >= 0 ? "#4C9A82" : "#B85C4A" }}>{fmt(income - expense)}</div>
+      </div>
+      <SimpleYearChart monthly={monthly} />
+      <CategoryBlock title="Income by category" tone="#4C9A82" cats={byCategory(inc)} />
+      <CategoryBlock title="Expense by category" tone="#B85C4A" cats={byCategory(exp)} />
+      <CardSpendBlock cards={data.cards} expenses={exp} />
+    </div>
+  );
+}
+function ModeToggle({ mode, setMode }) {
+  return (
+    <div style={{ ...s.toggleRow, marginBottom: 12 }}>
+      <button style={{ ...s.toggleBtn, ...(mode === "monthly" ? s.toggleActiveIncome : {}) }} onClick={() => setMode("monthly")}>Monthly</button>
+      <button style={{ ...s.toggleBtn, ...(mode === "yearly" ? s.toggleActiveIncome : {}) }} onClick={() => setMode("yearly")}>Yearly</button>
+    </div>
+  );
+}
+function CategoryBlock({ title, tone, cats }) {
+  if (cats.length === 0) return null;
+  const total = cats.reduce((s2, [, v]) => s2 + v, 0);
+  return (
+    <div style={{ marginTop: 16 }}>
+      <div style={s.sectionTitle}>{title}</div>
+      <div style={{ marginTop: 8 }}>
+        {cats.map(([cat, amt]) => (
+          <div key={cat} style={s.catRow}>
+            <span>{cat}</span>
+            <div style={s.catBarTrack}><div style={{ ...s.catBarFill, width: `${total ? (amt / total) * 100 : 0}%`, background: tone }} /></div>
+            <span style={{ ...s.mono, color: tone }}>{fmt(amt)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+function CardSpendBlock({ cards, expenses }) {
+  const byCard = cards.map((c) => ({
+    name: c.name,
+    amount: expenses.filter((e) => e.source.type === "card" && e.source.id === c.id).reduce((s2, e) => s2 + Number(e.amount || 0), 0),
+  })).filter((c) => c.amount > 0).sort((a, b) => b.amount - a.amount);
+  if (byCard.length === 0) return null;
+  const total = byCard.reduce((s2, c) => s2 + c.amount, 0);
+  return (
+    <div style={{ marginTop: 16 }}>
+      <div style={s.sectionTitle}>Spent by card</div>
+      <div style={{ marginTop: 8 }}>
+        {byCard.map((c) => (
+          <div key={c.name} style={s.catRow}>
+            <span>{c.name}</span>
+            <div style={s.catBarTrack}><div style={{ ...s.catBarFill, width: `${total ? (c.amount / total) * 100 : 0}%`, background: "#C1543F" }} /></div>
+            <span style={{ ...s.mono, color: "#C1543F" }}>{fmt(c.amount)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ---------------- shared ----------------
+function RowHead({ title, onAdd, addLabel }) {
+  return <div style={s.rowHead}><h2 style={s.sectionTitle}>{title}</h2><button style={s.addBtn} onClick={onAdd}><Plus size={14} /> {addLabel}</button></div>;
+}
+function Empty({ text }) { return <div style={s.empty}>{text}</div>; }
+function Modal({ title, onClose, children }) {
+  return (
+    <div style={s.overlay} onClick={onClose}>
+      <div style={s.modal} onClick={(e) => e.stopPropagation()}>
+        <div style={s.modalHead}><h3 style={s.modalTitle}>{title}</h3><button style={s.modalClose} onClick={onClose}><X size={16} /></button></div>
+        {children}
+      </div>
+    </div>
+  );
+}
+function FormShell({ children, onSubmit, valid, submitLabel }) {
+  return <form onSubmit={(e) => { e.preventDefault(); onSubmit(); }}>{children}<button style={{ ...s.submitBtn, opacity: valid ? 1 : 0.5 }} disabled={!valid} type="submit">{submitLabel}</button></form>;
+}
+function Field({ label, children }) { return <label style={s.field}><span style={s.fieldLabel}>{label}</span>{children}</label>; }
+
+const s = {
+  page: { minHeight: "100vh", background: "#12151C", color: "#EAEBEF", fontFamily: "system-ui, -apple-system, sans-serif", padding: "18px 12px 60px" },
+  wrap: { maxWidth: 640, margin: "0 auto" },
+  h1: { fontSize: 22, fontWeight: 700, margin: "0 0 14px" },
+  muted: { color: "#7C8698", textAlign: "center", padding: 40 },
+  logoutBtn: { display: "flex", alignItems: "center", gap: 4, background: "#1A1F29", color: "#8B93A3", border: "1px solid #242B38", borderRadius: 8, padding: "6px 10px", fontSize: 12, cursor: "pointer", height: "fit-content" },
+  tabRow: { display: "flex", gap: 6, overflowX: "auto", paddingBottom: 10, marginBottom: 14, WebkitOverflowScrolling: "touch" },
+  tabBtn: { display: "flex", alignItems: "center", gap: 5, whiteSpace: "nowrap", background: "#1A1F29", color: "#8B93A3", border: "1px solid #242B38", borderRadius: 8, padding: "9px 12px", fontSize: 13, cursor: "pointer", minHeight: 40 },
+  tabBtnActive: { background: "#242B38", color: "#EAEBEF", borderColor: "#3A4353" },
+  netCard: { background: "#1A1F29", border: "1px solid #242B38", borderRadius: 14, padding: 18, textAlign: "center", marginBottom: 14 },
+  netLabel: { fontSize: 12, color: "#7C8698", marginBottom: 6 },
+  netValue: { fontSize: 32, fontWeight: 700 },
+  netFormula: { fontSize: 11, color: "#5C6478", marginTop: 6 },
+  grid2: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 },
+  miniStat: { background: "#1A1F29", border: "1px solid #242B38", borderRadius: 10, padding: 12 },
+  miniLabel: { fontSize: 11.5, color: "#7C8698", marginBottom: 4 },
+  miniValue: { fontSize: 17, fontWeight: 600 },
+  miniSub: { fontSize: 10.5, color: "#5C6478", marginTop: 2 },
+  sectionTitle: { fontSize: 15.5, fontWeight: 600, margin: 0 },
+  rowHead: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 },
+  addBtn: { display: "flex", alignItems: "center", gap: 4, background: "#242B38", color: "#EAEBEF", border: "1px solid #2E3644", borderRadius: 8, padding: "8px 12px", fontSize: 13, cursor: "pointer", minHeight: 38 },
+  smallSolidBtn: { background: "#C6A15B", color: "#12151C", border: "none", borderRadius: 8, padding: "8px 12px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" },
+  empty: { color: "#7C8698", fontSize: 13, padding: "16px 14px", background: "#1A1F29", borderRadius: 10, border: "1px dashed #2A3140", textAlign: "center" },
+  card: { background: "#1A1F29", border: "1px solid #242B38", borderRadius: 12, marginBottom: 8, overflow: "hidden" },
+  cardRow: { display: "flex", alignItems: "center", gap: 8, padding: "12px 12px", cursor: "pointer" },
+  cardName: { fontSize: 14, fontWeight: 600 },
+  cardSub: { fontSize: 11.5, color: "#7C8698", marginTop: 2 },
+  cardBody: { padding: "0 12px 12px 34px", display: "flex", flexDirection: "column", gap: 6 },
+  smallAddBtn: { display: "flex", alignItems: "center", gap: 4, background: "none", color: "#C6A15B", border: "none", fontSize: 12.5, cursor: "pointer", padding: "4px 0", marginBottom: 2, alignSelf: "flex-start" },
+  historyRow: { display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, padding: "6px 0", borderTop: "1px solid #20262F", cursor: "pointer" },
+  mono: { fontFamily: "ui-monospace, monospace", fontSize: 13, fontWeight: 500 },
+  dueRow: { display: "flex", justifyContent: "space-between", gap: 8, background: "#1A1F29", border: "1px solid #242B38", borderRadius: 8, padding: "9px 12px", fontSize: 13, marginBottom: 6 },
+  flowRow: { display: "flex", alignItems: "center", gap: 8, background: "#1A1F29", border: "1px solid #242B38", borderRadius: 10, padding: "10px 12px", marginBottom: 6, cursor: "pointer" },
+  iconDeleteBtn: { background: "none", border: "none", color: "#5C6478", cursor: "pointer", padding: 8, display: "flex" },
+  rowDelete: { background: "none", border: "none", color: "#5C6478", cursor: "pointer", padding: 6, display: "flex" },
+  payBtn: { display: "flex", alignItems: "center", gap: 3, background: "#1F3A32", color: "#4C9A82", border: "1px solid #2E5A4A", borderRadius: 6, padding: "5px 8px", fontSize: 11.5, cursor: "pointer" },
+  overlay: { position: "fixed", inset: 0, background: "rgba(8,10,14,0.7)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 50 },
+  modal: { background: "#1A1F29", border: "1px solid #2A3140", borderRadius: "16px 16px 0 0", padding: 20, width: "100%", maxWidth: 480, maxHeight: "85vh", overflowY: "auto" },
+  modalHead: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 },
+  modalTitle: { fontSize: 16, fontWeight: 600, margin: 0 },
+  modalClose: { background: "none", border: "none", color: "#7C8698", cursor: "pointer" },
+  field: { display: "block", marginBottom: 12 },
+  fieldLabel: { display: "block", fontSize: 12, color: "#7C8698", marginBottom: 5 },
+  input: { width: "100%", background: "#12151C", border: "1px solid #2A3140", borderRadius: 8, padding: "12px 12px", color: "#EAEBEF", fontSize: 16, boxSizing: "border-box" },
+  submitBtn: { width: "100%", background: "#C6A15B", color: "#12151C", border: "none", borderRadius: 8, padding: "14px", fontSize: 16, fontWeight: 600, cursor: "pointer", marginTop: 4 },
+  toggleRow: { display: "flex", gap: 8 },
+  toggleBtn: { flex: 1, background: "#12151C", border: "1px solid #2A3140", borderRadius: 8, padding: "9px", color: "#8B93A3", fontSize: 13, cursor: "pointer" },
+  toggleActiveIncome: { background: "#1F3A32", borderColor: "#4C9A82", color: "#4C9A82" },
+  toggleActiveExpense: { background: "#3A241F", borderColor: "#B85C4A", color: "#B85C4A" },
+  periodNav: { display: "flex", alignItems: "center", justifyContent: "center", gap: 16, marginBottom: 14 },
+  navBtn: { background: "#1A1F29", border: "1px solid #242B38", borderRadius: 8, color: "#EAEBEF", cursor: "pointer", padding: 6, display: "flex" },
+  periodLabel: { fontSize: 16, fontWeight: 600, minWidth: 110, textAlign: "center" },
+  chartBox: { background: "#1A1F29", border: "1px solid #242B38", borderRadius: 12, padding: "12px 8px 4px", marginTop: 14 },
+  catRow: { display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, padding: "6px 0" },
+  catBarTrack: { flex: 1, height: 6, background: "#20262F", borderRadius: 4, overflow: "hidden" },
+  catBarFill: { height: "100%", borderRadius: 4 },
+};
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+document.getElementById("root").dataset.rendered = "true";
+</script>
+</body>
+</html>
