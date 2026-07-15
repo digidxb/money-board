@@ -882,26 +882,71 @@ function PayCardForm({ accounts, onSave }) {
 function AccountsTab({ data, patch }) {
   const [showAdd, setShowAdd] = useState(false);
   const [editAcc, setEditAcc] = useState(null);
+  const [expanded, setExpanded] = useState(null);
   const saveAccount = (v) => {
     if (editAcc) patch({ accounts: data.accounts.map((a) => (a.id === editAcc.id ? { ...a, name: v.name, kind: v.kind } : a)) });
     else patch({ accounts: [...data.accounts, { id: uid(), ...v }] });
     setShowAdd(false); setEditAcc(null);
   };
+
+  const personName = (list, id) => list.find((p) => p.id === id)?.name;
+
+  const historyFor = (accountId) => {
+    const rows = [];
+    data.income.filter((e) => e.accountId === accountId).forEach((e) =>
+      rows.push({ date: e.date, amount: e.amount, dir: "in", label: e.category, detail: e.note || "Income" }));
+    data.expenses.filter((e) => e.source.type === "account" && e.source.id === accountId).forEach((e) =>
+      rows.push({ date: e.date, amount: e.amount, dir: "out", label: e.category, detail: e.note || "Expense" }));
+    data.cardPayments.filter((p) => p.accountId === accountId).forEach((p) => {
+      const card = data.cards.find((c) => c.id === p.cardId);
+      rows.push({ date: p.date, amount: p.amount, dir: "out", label: "Card payment", detail: card?.name || "Card" });
+    });
+    data.entriesOwedMe.filter((e) => e.paidAccountId === accountId).forEach((e) =>
+      rows.push({ date: e.paidDate, amount: e.amount, dir: "in", label: "Debt repaid", detail: `From ${personName(data.peopleOwedMe, e.personId) || "someone"}` }));
+    data.entriesOwedMe.filter((e) => e.source?.type === "account" && e.source.id === accountId).forEach((e) =>
+      rows.push({ date: e.date, amount: e.amount, dir: "out", label: "Lent out", detail: `To ${personName(data.peopleOwedMe, e.personId) || "someone"}` }));
+    data.entriesIOwe.filter((e) => e.paidAccountId === accountId).forEach((e) =>
+      rows.push({ date: e.paidDate, amount: e.amount, dir: "out", label: "Debt paid back", detail: `To ${personName(data.peopleIOwe, e.personId) || "someone"}` }));
+    data.entriesIOwe.filter((e) => e.source?.type === "account" && e.source.id === accountId).forEach((e) =>
+      rows.push({ date: e.date, amount: e.amount, dir: "in", label: "Borrowed", detail: `From ${personName(data.peopleIOwe, e.personId) || "someone"}` }));
+    return rows.sort((a, b) => new Date(b.date) - new Date(a.date));
+  };
+
   return (
     <div>
       <RowHead title="Bank & cash accounts" onAdd={() => setShowAdd(true)} addLabel="Add account" />
       {data.accounts.length === 0 && <Empty text="No accounts yet. Add one — expenses, income, card payments, and settled debts all connect to it." />}
-      {data.accounts.map((a) => (
-        <div key={a.id} style={s.flowRow}>
-          <div style={{ flex: 1, cursor: "pointer" }} onClick={() => setEditAcc(a)}>
-            <div style={s.cardName}>{a.name}</div>
-            <div style={s.cardSub}>{a.kind}</div>
+      {data.accounts.map((a) => {
+        const isOpen = expanded === a.id;
+        const history = isOpen ? historyFor(a.id) : [];
+        return (
+          <div key={a.id} style={s.card}>
+            <div style={s.cardRow} onClick={() => setExpanded(isOpen ? null : a.id)}>
+              {isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+              <div style={{ flex: 1 }}>
+                <div style={s.cardName}>{a.name}</div>
+                <div style={s.cardSub}>{a.kind}</div>
+              </div>
+              <div style={s.mono}>{fmt(a.balance)}</div>
+              <button style={s.iconDeleteBtn} onClick={(e) => { e.stopPropagation(); if (confirm(`Delete "${a.name}"? This can't be undone.`)) patch({ accounts: data.accounts.filter((x) => x.id !== a.id) }); }}><Trash2 size={13} /></button>
+            </div>
+            {isOpen && (
+              <div style={s.cardBody}>
+                <button style={{ ...s.smallAddBtn, color: "#8B93A3" }} onClick={() => setEditAcc(a)}>Edit account</button>
+                {history.length === 0 ? <Empty text="No transactions on this account yet." /> : history.map((h, i) => (
+                  <div key={i} style={s.historyRow}>
+                    <span style={{ color: h.dir === "in" ? "#4C9A82" : "#8B93A3", fontSize: 11 }}>{h.label}</span>
+                    <span>{fmtDate(h.date)}</span>
+                    <span style={{ flex: 1, color: "#7C8698", fontSize: 11 }}>{h.detail}</span>
+                    <span style={{ ...s.mono, color: h.dir === "in" ? "#4C9A82" : "#B85C4A" }}>{h.dir === "in" ? "+" : "-"}{fmt(h.amount)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
-          <div style={s.mono}>{fmt(a.balance)}</div>
-          <button style={s.iconDeleteBtn} onClick={() => { if (confirm(`Delete "${a.name}"? This can't be undone.`)) patch({ accounts: data.accounts.filter((x) => x.id !== a.id) }); }}><Trash2 size={13} /></button>
-        </div>
-      ))}
-      <div style={{ fontSize: 11.5, color: "#5C6478", marginTop: 8 }}>Tap an account to rename it. Balances update automatically from transactions.</div>
+        );
+      })}
+      <div style={{ fontSize: 11.5, color: "#5C6478", marginTop: 8 }}>Tap an account to see every transaction that changed its balance.</div>
       {(showAdd || editAcc) && (
         <Modal title={editAcc ? "Edit account" : "Add account"} onClose={() => { setShowAdd(false); setEditAcc(null); }}>
           <AccountForm initial={editAcc} onSave={saveAccount} />
@@ -995,18 +1040,35 @@ function PeopleTab({ title, tone, kind, data, patch }) {
     }));
     setPayEntry(null);
   };
-  const removeEntry = (entry) => {
+  // Undoing a paid entry restores it to "owed" — reverses the account
+  // change, and if it was a split-off portion of a larger entry (from a
+  // partial payment), merges it back into the original entry instead of
+  // leaving two separate pieces behind.
+  const undoPayment = (entry) => {
+    if (!confirm("Undo this payment? It'll go back to being owed.")) return;
+    patch((d) => {
+      const accounts = bumpAccount(d.accounts, entry.paidAccountId, kind === "owedMe" ? -entry.amount : entry.amount);
+      let list = d[entriesKey];
+      if (entry.mergeBackId) {
+        list = list
+          .map((x) => (x.id === entry.mergeBackId ? { ...x, amount: Number(x.amount || 0) + entry.amount } : x))
+          .filter((x) => x.id !== entry.id);
+      } else {
+        list = list.map((x) => (x.id === entry.id ? { ...x, paid: false, paidAccountId: null, paidDate: null } : x));
+      }
+      return { accounts, [entriesKey]: list };
+    });
+  };
+  const deleteEntry = (entry) => {
     if (!confirm("Delete this entry? This can't be undone.")) return;
     patch((d) => {
       let accounts = d.accounts, cards = d.cards;
-      if (entry.paid && entry.paidAccountId) accounts = bumpAccount(accounts, entry.paidAccountId, kind === "owedMe" ? -entry.amount : entry.amount);
-      else if (!entry.paid) {
-        const src = entry.source || (entry.sourceAccountId ? { type: "account", id: entry.sourceAccountId } : null);
-        ({ accounts, cards } = applySource(accounts, cards, src, entry.amount, -1));
-      }
+      const src = entry.source || (entry.sourceAccountId ? { type: "account", id: entry.sourceAccountId } : null);
+      ({ accounts, cards } = applySource(accounts, cards, src, entry.amount, -1));
       return { accounts, cards, [entriesKey]: d[entriesKey].filter((x) => x.id !== entry.id) };
     });
   };
+  const removeEntry = (entry) => (entry.paid ? undoPayment(entry) : deleteEntry(entry));
 
   // Settles every unpaid entry for a person at once. If they paid more than
   // the total owed, the extra is recorded as a new entry on the opposite
@@ -1028,7 +1090,7 @@ function PeopleTab({ title, tone, kind, data, patch }) {
           remaining -= e.amount;
         } else {
           // partial payment lands mid-entry: split into a paid portion and a smaller remaining unpaid portion
-          newEntries.push({ ...e, id: uid(), amount: remaining, paid: true, paidAccountId: accountId, paidDate: date });
+          newEntries.push({ ...e, id: uid(), amount: remaining, paid: true, paidAccountId: accountId, paidDate: date, mergeBackId: e.id });
           newEntries.push({ ...e, amount: e.amount - remaining });
           remaining = 0;
         }
@@ -1093,8 +1155,14 @@ function PeopleTab({ title, tone, kind, data, patch }) {
                       {e.details}{sourceLabel(e) ? `${e.details ? " · " : ""}${sourceLabel(e)}` : ""}
                     </span>
                     <span style={{ ...s.mono, color: e.paid ? "#5C6478" : tone }}>{fmt(e.amount)}</span>
-                    {!e.paid ? <button style={s.payBtn} onClick={(ev) => { ev.stopPropagation(); setPayEntry(e); }}><Check size={11} /> Paid</button> : <span style={{ fontSize: 10.5, color: "#4C9A82" }}>settled</span>}
-                    <button style={s.rowDelete} onClick={(ev) => { ev.stopPropagation(); removeEntry(e); }}><Trash2 size={12} /></button>
+                    {!e.paid ? (
+                      <>
+                        <button style={s.payBtn} onClick={(ev) => { ev.stopPropagation(); setPayEntry(e); }}><Check size={11} /> Paid</button>
+                        <button style={s.rowDelete} onClick={(ev) => { ev.stopPropagation(); removeEntry(e); }}><Trash2 size={12} /></button>
+                      </>
+                    ) : (
+                      <button style={{ ...s.payBtn, background: "#2A2418", color: "#C6A15B", borderColor: "#4A3F2A" }} onClick={(ev) => { ev.stopPropagation(); removeEntry(e); }}>Undo</button>
+                    )}
                   </div>
                 ))}
               </div>
