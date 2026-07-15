@@ -32,23 +32,12 @@
 <script>
   // ===== PASTE YOUR FIREBASE CONFIG BELOW (see README) =====
   const firebaseConfig = {
-  // Import the functions you need from the SDKs you need
-import { initializeApp } from "firebase/app";
-// TODO: Add SDKs for Firebase products that you want to use
-// https://firebase.google.com/docs/web/setup#available-libraries
-
-// Your web app's Firebase configuration
-const firebaseConfig = {
-  apiKey: "AIzaSyDtfCaYx_YerYhJG7kKPfZ3ht0B07g0CKU",
-  authDomain: "money-board-63c70.firebaseapp.com",
-  projectId: "money-board-63c70",
-  storageBucket: "money-board-63c70.firebasestorage.app",
-  messagingSenderId: "632749176039",
-  appId: "1:632749176039:web:b138bed800749f52fd9e42"
-};
-
-// Initialize Firebase
-const app = initializeApp(firebaseConfig);
+    apiKey: "AIzaSyDtfCaYx_YerYhJG7kKPfZ3ht0B07g0CKU",
+    authDomain: "money-board-63c70.firebaseapp.com",
+    projectId: "money-board-63c70",
+    storageBucket: "money-board-63c70.firebasestorage.app",
+    messagingSenderId: "632749176039",
+    appId: "1:632749176039:web:b138bed800749f52fd9e42",
   };
   // If you haven't pasted real Firebase keys in yet, OR if the Firebase
   // scripts above got blocked by a network/firewall, run in local preview
@@ -57,11 +46,11 @@ const app = initializeApp(firebaseConfig);
   const CONFIG_SET = firebaseConfig.apiKey !== "YOUR_API_KEY";
   const PREVIEW_MODE = !FIREBASE_LOADED || !CONFIG_SET;
 
-  let auth, googleProvider, db;
+  let auth, db;
+  const PIN_EMAIL = "owner@money-board.local"; // fixed account behind the PIN — don't change after first setup
   if (FIREBASE_LOADED) {
     firebase.initializeApp(firebaseConfig);
     auth = firebase.auth();
-    googleProvider = new firebase.auth.GoogleAuthProvider();
     db = firebase.firestore();
   }
 
@@ -70,9 +59,24 @@ const app = initializeApp(firebaseConfig);
     if (PREVIEW_MODE) { cb({ uid: "preview-user", displayName: "Preview" }); return () => {}; }
     return authObj.onAuthStateChanged(cb);
   }
-  function signInWithPopup(authObj, provider) {
-    if (PREVIEW_MODE) return Promise.resolve();
-    return authObj.signInWithPopup(provider);
+  // Tries to sign in with this PIN; if that fails, tries to create the account
+  // with this PIN (this is how the very first PIN gets set). If creation fails
+  // because the account already exists, the PIN was just wrong.
+  async function signInWithPin(authObj, pin) {
+    if (PREVIEW_MODE) return { ok: true };
+    try {
+      await authObj.signInWithEmailAndPassword(PIN_EMAIL, pin);
+      return { ok: true };
+    } catch (signInErr) {
+      try {
+        await authObj.createUserWithEmailAndPassword(PIN_EMAIL, pin);
+        return { ok: true, created: true };
+      } catch (createErr) {
+        if (createErr.code === "auth/email-already-in-use") return { ok: false, error: "Wrong PIN." };
+        if (createErr.code === "auth/weak-password") return { ok: false, error: "PIN must be at least 6 digits." };
+        return { ok: false, error: createErr.message };
+      }
+    }
   }
   function signOut(authObj) {
     if (PREVIEW_MODE) return Promise.resolve();
@@ -203,12 +207,38 @@ function useStorage(uidStr) {
 }
 
 function LoginScreen() {
+  const [pin, setPin] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    setError("");
+    if (pin.length < 6) return setError("PIN must be at least 6 digits.");
+    setBusy(true);
+    const res = await signInWithPin(auth, pin);
+    setBusy(false);
+    if (!res.ok) setError(res.error || "Something went wrong.");
+  };
+
   return (
     <div style={s.page}>
       <div style={{ ...s.wrap, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "80vh", gap: 16 }}>
         <h1 style={s.h1}>Money Board</h1>
-        <p style={{ color: "#7C8698", textAlign: "center", fontSize: 14, maxWidth: 280 }}>Sign in to sync your debts, credits, cards and cashflow across devices.</p>
-        <button style={s.submitBtn} onClick={() => signInWithPopup(auth, googleProvider)}>Sign in with Google</button>
+        <p style={{ color: "#7C8698", textAlign: "center", fontSize: 14, maxWidth: 280 }}>
+          Enter your PIN (6+ digits). First time you use this, it sets your PIN — use the same one on any device to get back in.
+        </p>
+        <div style={{ width: "100%", maxWidth: 280 }}>
+          <input
+            style={s.input} type="password" inputMode="numeric" value={pin}
+            onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
+            onKeyDown={(e) => e.key === "Enter" && submit()}
+            placeholder="PIN (6+ digits)" autoFocus
+          />
+          {error && <div style={{ color: "#B85C4A", fontSize: 12.5, marginTop: 8 }}>{error}</div>}
+          <button style={{ ...s.submitBtn, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={submit}>
+            {busy ? "Please wait…" : "Continue"}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -252,7 +282,7 @@ function MoneyBoard({ user }) {
       <div style={s.wrap}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
           <h1 style={s.h1}>Money Board</h1>
-          {!PREVIEW_MODE && <button style={s.logoutBtn} onClick={() => signOut(auth)}><LogOut size={13} /> {user.displayName?.split(" ")[0] || "Sign out"}</button>}
+          {!PREVIEW_MODE && <button style={s.logoutBtn} onClick={() => signOut(auth)}><LogOut size={13} /> Lock</button>}
         </div>
         {PREVIEW_MODE && (
           <div style={{ background: "#3A241F", border: "1px solid #B85C4A", color: "#E8B4A8", fontSize: 12, borderRadius: 8, padding: "9px 12px", marginBottom: 14 }}>
