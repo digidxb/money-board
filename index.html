@@ -366,7 +366,7 @@ function Dashboard({ netWorth, liquidNow, totalBalance, totalCardDue, totalLimit
               <span style={{ color: c.days < 0 ? "#B85C4A" : c.days <= 5 ? "#C6A15B" : "#7C8698" }}>
                 {c.days < 0 ? `${Math.abs(c.days)}d overdue` : c.days === 0 ? "Due today" : `in ${c.days}d`}
               </span>
-              <span style={s.mono}>{fmt(c.due)}</span>
+              <span style={s.mono}>{fmt(c.dueAmount)}</span>
             </div>
           ))}
         </div>
@@ -626,8 +626,7 @@ function CardsTab({ data, patch }) {
   const [editCard, setEditCard] = useState(null);
   const [expanded, setExpanded] = useState(null);
   const [payFor, setPayFor] = useState(null);
-  const [dueDateFor, setDueDateFor] = useState(null);
-  const [dueAmountFor, setDueAmountFor] = useState(null);
+  const [statementFor, setStatementFor] = useState(null);
 
   const removeCard = (id) => {
     patch({
@@ -637,13 +636,14 @@ function CardsTab({ data, patch }) {
     });
   };
   const saveCard = (v) => {
-    if (editCard) patch({ cards: data.cards.map((c) => (c.id === editCard.id ? { ...c, name: v.name, limit: v.limit, dueDate: v.dueDate } : c)) });
-    else patch({ cards: [...data.cards, { id: uid(), due: 0, ...v }] });
+    if (editCard) patch({ cards: data.cards.map((c) => (c.id === editCard.id ? { ...c, name: v.name, limit: v.limit } : c)) });
+    else patch({ cards: [...data.cards, { id: uid(), due: 0, dueAmount: 0, dueDate: "", ...v }] });
     setShowAddCard(false); setEditCard(null);
   };
+  const bumpStatementDue = (cards, id, delta) => cards.map((c) => (c.id === id ? { ...c, dueAmount: Math.max(0, Number(c.dueAmount || 0) + delta) } : c));
   const logPayment = (cardId, { amount, date, accountId }) => {
     patch((d) => ({
-      cards: bumpCardDue(d.cards, cardId, -amount),
+      cards: bumpStatementDue(bumpCardDue(d.cards, cardId, -amount), cardId, -amount),
       accounts: bumpAccount(d.accounts, accountId, -amount),
       cardPayments: [...d.cardPayments, { id: uid(), cardId, accountId, amount, date }],
     }));
@@ -651,18 +651,16 @@ function CardsTab({ data, patch }) {
   };
   const deletePayment = (p) => {
     patch((d) => ({
-      cards: bumpCardDue(d.cards, p.cardId, p.amount),
+      cards: bumpStatementDue(bumpCardDue(d.cards, p.cardId, p.amount), p.cardId, p.amount),
       accounts: bumpAccount(d.accounts, p.accountId, p.amount),
       cardPayments: d.cardPayments.filter((x) => x.id !== p.id),
     }));
   };
-  const updateDueDate = (cardId, dueDate) => {
-    patch({ cards: data.cards.map((c) => (c.id === cardId ? { ...c, dueDate } : c)) });
-    setDueDateFor(null);
-  };
-  const updateDueAmount = (cardId, due) => {
-    patch({ cards: data.cards.map((c) => (c.id === cardId ? { ...c, due } : c)) });
-    setDueAmountFor(null);
+  // Sets ONLY the statement's due amount + date. Never touches the real
+  // running balance (that only ever changes from actual charges/payments).
+  const updateStatementDue = (cardId, { dueAmount, dueDate }) => {
+    patch({ cards: data.cards.map((c) => (c.id === cardId ? { ...c, dueAmount, dueDate } : c)) });
+    setStatementFor(null);
   };
 
   return (
@@ -686,15 +684,24 @@ function CardsTab({ data, patch }) {
               </div>
               <div style={{ textAlign: "right" }}>
                 <div style={s.mono}>{fmt(c.due)}</div>
-                {days !== null && <div style={{ fontSize: 11, color: days < 0 ? "#B85C4A" : days <= 5 ? "#C6A15B" : "#7C8698" }}>{days < 0 ? `overdue ${Math.abs(days)}d` : `due ${fmtDate(c.dueDate)}`}</div>}
+                <div style={{ fontSize: 10, color: "#5C6478" }}>total due</div>
               </div>
               <button style={s.iconDeleteBtn} onClick={(e) => { e.stopPropagation(); removeCard(c.id); }}><Trash2 size={13} /></button>
             </div>
+            {(c.dueAmount > 0 || c.dueDate) && (
+              <div style={{ padding: "0 12px 10px 34px", display: "flex", alignItems: "center", gap: 8, fontSize: 12 }} onClick={() => setExpanded(isOpen ? null : c.id)}>
+                <span style={{ color: "#8B93A3" }}>Pay {fmt(c.dueAmount)} by {fmtDate(c.dueDate)}</span>
+                {days !== null && (
+                  <span style={{ color: days < 0 ? "#B85C4A" : days <= 5 ? "#C6A15B" : "#7C8698" }}>
+                    {days < 0 ? `overdue ${Math.abs(days)}d` : days === 0 ? "due today" : `in ${days}d`}
+                  </span>
+                )}
+              </div>
+            )}
             {isOpen && (
               <div style={s.cardBody}>
                 <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-                  <button style={s.smallAddBtn} onClick={() => setDueDateFor(c.id)}><Plus size={13} /> Set due date</button>
-                  <button style={s.smallAddBtn} onClick={() => setDueAmountFor(c.id)}><Plus size={13} /> Correct due amount</button>
+                  <button style={s.smallAddBtn} onClick={() => setStatementFor(c.id)}><Plus size={13} /> Set due amount & date</button>
                   <button style={s.smallAddBtn} onClick={() => setPayFor(c.id)}><Plus size={13} /> Log payment</button>
                   <button style={{ ...s.smallAddBtn, color: "#8B93A3" }} onClick={() => setEditCard(c)}>Edit card</button>
                 </div>
@@ -721,37 +728,26 @@ function CardsTab({ data, patch }) {
           <PayCardForm accounts={data.accounts} onSave={(v) => logPayment(payFor, v)} />
         </Modal>
       )}
-      {dueDateFor && (
-        <Modal title="Set due date" onClose={() => setDueDateFor(null)}>
-          <DueDateForm card={data.cards.find((c) => c.id === dueDateFor)} onSave={(v) => updateDueDate(dueDateFor, v)} />
-        </Modal>
-      )}
-      {dueAmountFor && (
-        <Modal title="Correct due amount" onClose={() => setDueAmountFor(null)}>
-          <DueAmountForm card={data.cards.find((c) => c.id === dueAmountFor)} onSave={(v) => updateDueAmount(dueAmountFor, v)} />
+      {statementFor && (
+        <Modal title="Set due amount & date" onClose={() => setStatementFor(null)}>
+          <StatementForm card={data.cards.find((c) => c.id === statementFor)} onSave={(v) => updateStatementDue(statementFor, v)} />
         </Modal>
       )}
     </div>
   );
 }
 
-function DueDateForm({ card, onSave }) {
+function StatementForm({ card, onSave }) {
+  const [dueAmount, setDueAmount] = useState(String(card.dueAmount || ""));
   const [dueDate, setDueDate] = useState(card.dueDate || "");
+  const valid = dueAmount !== "" && dueDate;
   return (
-    <FormShell onSubmit={() => onSave(dueDate)} valid={true} submitLabel="Save date">
-      <div style={{ fontSize: 11.5, color: "#5C6478", marginBottom: 12 }}>This only changes the due date — the amount ({fmt(card.due)}) stays exactly the same.</div>
-      <Field label="Due date"><input style={s.input} type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} autoFocus /></Field>
-    </FormShell>
-  );
-}
-
-function DueAmountForm({ card, onSave }) {
-  const [due, setDue] = useState(String(card.due || 0));
-  const valid = due !== "";
-  return (
-    <FormShell onSubmit={() => valid && onSave(Number(due))} valid={valid} submitLabel="Save amount">
-      <div style={{ fontSize: 11.5, color: "#5C6478", marginBottom: 12 }}>Use this only if the due amount doesn't match what you've logged (e.g. a fee or a charge you didn't add individually). This replaces the total — it doesn't add to it. Current: {fmt(card.due)}. Due date ({card.dueDate ? fmtDate(card.dueDate) : "not set"}) stays the same.</div>
-      <Field label="Correct total due (AED)"><input style={s.input} type="number" value={due} onChange={(e) => setDue(e.target.value)} placeholder="1200" autoFocus /></Field>
+    <FormShell onSubmit={() => valid && onSave({ dueAmount: Number(dueAmount), dueDate })} valid={valid} submitLabel="Save">
+      <div style={{ fontSize: 11.5, color: "#5C6478", marginBottom: 12 }}>
+        This is just what the bank says to pay this cycle — it's tracked separately and never changes your Total Due ({fmt(card.due)}). Total Due only moves when you log a charge or a payment.
+      </div>
+      <Field label="Amount to pay (AED)"><input style={s.input} type="number" value={dueAmount} onChange={(e) => setDueAmount(e.target.value)} placeholder="1200" autoFocus /></Field>
+      <Field label="Due date"><input style={s.input} type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} /></Field>
     </FormShell>
   );
 }
@@ -760,14 +756,13 @@ function CardForm({ initial, onSave }) {
   const [name, setName] = useState(initial?.name || "");
   const [limit, setLimit] = useState(initial ? String(initial.limit) : "");
   const [due, setDue] = useState(initial ? String(initial.due) : "");
-  const [dueDate, setDueDate] = useState(initial?.dueDate || "");
   const valid = name.trim() && limit !== "";
   return (
-    <FormShell onSubmit={() => valid && onSave({ name: name.trim(), limit: Number(limit), due: Number(due || 0), dueDate })} valid={valid} submitLabel={initial ? "Save changes" : "Save card"}>
+    <FormShell onSubmit={() => valid && onSave({ name: name.trim(), limit: Number(limit), due: Number(due || 0) })} valid={valid} submitLabel={initial ? "Save changes" : "Save card"}>
       <Field label="Card name"><input style={s.input} value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Emirates NBD Titanium" autoFocus /></Field>
       <Field label="Credit limit (AED)"><input style={s.input} type="number" value={limit} onChange={(e) => setLimit(e.target.value)} placeholder="10000" /></Field>
       {!initial && <Field label="Current outstanding balance (AED, if any)"><input style={s.input} type="number" value={due} onChange={(e) => setDue(e.target.value)} placeholder="0" /></Field>}
-      <Field label="Next due date (optional)"><input style={s.input} type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} /></Field>
+      {!initial && <div style={{ fontSize: 11.5, color: "#5C6478", marginTop: -6, marginBottom: 4 }}>You can set the statement due amount & date separately after adding the card.</div>}
     </FormShell>
   );
 }
