@@ -1126,6 +1126,73 @@ function MarkPaidForm({ accounts, label, onSave }) {
 }
 
 // ---------------- Reports ----------------
+function CurrentStatusSnapshot({ data }) {
+  const totalCardDue = data.cards.reduce((s2, c) => s2 + Number(c.due || 0), 0);
+  const totalBalance = data.accounts.reduce((s2, a) => s2 + Number(a.balance || 0), 0);
+  const totalOwedToMe = data.entriesOwedMe.filter((e) => !e.paid).reduce((s2, e) => s2 + Number(e.amount || 0), 0);
+  const totalIOwe = data.entriesIOwe.filter((e) => !e.paid).reduce((s2, e) => s2 + Number(e.amount || 0), 0);
+  const netWorth = totalBalance + totalOwedToMe - totalCardDue - totalIOwe;
+
+  const personOutstanding = (entries, personId) => entries.filter((e) => e.personId === personId && !e.paid).reduce((s2, e) => s2 + Number(e.amount || 0), 0);
+
+  return (
+    <div style={{ marginBottom: 20, paddingBottom: 16, borderBottom: "1px solid #242B38" }}>
+      <div style={{ fontSize: 11, color: "#7C8698", marginBottom: 10 }}>Snapshot as of {fmtDate(todayISO())}</div>
+
+      <div style={s.netCard}>
+        <div style={s.netLabel}>Net worth right now</div>
+        <div style={{ ...s.netValue, color: netWorth >= 0 ? "#4C9A82" : "#B85C4A" }}>{fmt(netWorth)}</div>
+      </div>
+
+      <div style={{ ...s.sectionTitle, marginTop: 16, marginBottom: 8 }}>Accounts</div>
+      {data.accounts.length === 0 ? <Empty text="No accounts." /> : data.accounts.map((a) => (
+        <div key={a.id} style={s.dueRow}><span>{a.name} ({a.kind})</span><span style={s.mono}>{fmt(a.balance)}</span></div>
+      ))}
+
+      <div style={{ ...s.sectionTitle, marginTop: 16, marginBottom: 8 }}>Credit cards</div>
+      {data.cards.length === 0 ? <Empty text="No cards." /> : data.cards.map((c) => {
+        const charges = data.expenses.filter((e) => e.source.type === "card" && e.source.id === c.id).map((e) => ({ ...e, kind: "charge" }));
+        const payments = data.cardPayments.filter((p) => p.cardId === c.id).map((p) => ({ ...p, kind: "payment" }));
+        const history = [...charges, ...payments].sort((a, b) => new Date(a.date) - new Date(b.date));
+        return (
+          <div key={c.id} style={{ marginBottom: 12, background: "#1A1F29", border: "1px solid #242B38", borderRadius: 10, padding: 12 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
+              <span>{c.name}</span><span style={s.mono}>{fmt(c.due)} total due</span>
+            </div>
+            <div style={{ fontSize: 11.5, color: "#7C8698", marginBottom: 8 }}>
+              Limit {fmt(c.limit)} · Available {fmt(Number(c.limit || 0) - Number(c.due || 0))}
+              {c.dueAmount > 0 && ` · Pay ${fmt(c.dueAmount)} by ${fmtDate(c.dueDate)}`}
+            </div>
+            {history.length === 0 ? (
+              <div style={{ fontSize: 11.5, color: "#5C6478" }}>No charges or payments yet.</div>
+            ) : (
+              <div>
+                {history.map((h) => (
+                  <div key={h.id} style={{ display: "flex", gap: 8, fontSize: 11.5, padding: "3px 0", borderTop: "1px solid #20262F" }}>
+                    <span style={{ color: h.kind === "payment" ? "#4C9A82" : "#8B93A3" }}>{h.kind === "payment" ? "Paid" : h.category}</span>
+                    <span>{fmtDate(h.date)}</span>
+                    <span style={{ marginLeft: "auto", color: h.kind === "payment" ? "#4C9A82" : "#B85C4A" }}>{h.kind === "payment" ? "-" : "+"}{fmt(h.amount)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      <div style={{ ...s.sectionTitle, marginTop: 16, marginBottom: 8 }}>Owed to me (total {fmt(totalOwedToMe)})</div>
+      {data.peopleOwedMe.length === 0 ? <Empty text="No one." /> : data.peopleOwedMe.map((p) => (
+        <div key={p.id} style={s.dueRow}><span>{p.name}</span><span style={s.mono}>{fmt(personOutstanding(data.entriesOwedMe, p.id))}</span></div>
+      ))}
+
+      <div style={{ ...s.sectionTitle, marginTop: 16, marginBottom: 8 }}>I owe (total {fmt(totalIOwe)})</div>
+      {data.peopleIOwe.length === 0 ? <Empty text="No one." /> : data.peopleIOwe.map((p) => (
+        <div key={p.id} style={s.dueRow}><span>{p.name}</span><span style={s.mono}>{fmt(personOutstanding(data.entriesIOwe, p.id))}</span></div>
+      ))}
+    </div>
+  );
+}
+
 function ReportsTab({ data, setData }) {
   const [mode, setMode] = useState("monthly");
   const now = new Date();
@@ -1176,6 +1243,7 @@ function ReportsTab({ data, setData }) {
     </div>
   );
   const printHeading = <h2 style={{ ...s.sectionTitle, marginBottom: 12 }}>Money Board — Report</h2>;
+  const snapshot = <CurrentStatusSnapshot data={data} />;
 
   if (mode === "monthly") {
     const inc = inPeriod(data.income, year, month);
@@ -1187,6 +1255,7 @@ function ReportsTab({ data, setData }) {
       <div>
         {dataButtons}
         {printHeading}
+        {snapshot}
         <ModeToggle mode={mode} setMode={setMode} />
         <div style={s.periodNav}>
           <button className="no-print" style={s.navBtn} onClick={() => shiftMonth(-1)}><ChevronLeft size={16} /></button>
@@ -1219,6 +1288,7 @@ function ReportsTab({ data, setData }) {
     <div>
       {dataButtons}
       {printHeading}
+      {snapshot}
       <ModeToggle mode={mode} setMode={setMode} />
       <div style={s.periodNav}>
         <button className="no-print" style={s.navBtn} onClick={() => setYear(year - 1)}><ChevronLeft size={16} /></button>
