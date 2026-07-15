@@ -174,6 +174,16 @@ function useAuthUser() {
   return user;
 }
 
+function stripUndefined(value) {
+  if (Array.isArray(value)) return value.map(stripUndefined);
+  if (value && typeof value === "object") {
+    const out = {};
+    Object.keys(value).forEach((k) => { if (value[k] !== undefined) out[k] = stripUndefined(value[k]); });
+    return out;
+  }
+  return value;
+}
+
 function useStorage(uidStr) {
   const [data, setData] = useState(emptyState);
   const [loaded, setLoaded] = useState(false);
@@ -197,7 +207,7 @@ function useStorage(uidStr) {
     if (!loaded) return;
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      if (docRef) setDoc(docRef, data).catch((e) => console.error("Save failed", e));
+      if (docRef) setDoc(docRef, stripUndefined(data)).catch((e) => console.error("Save failed", e));
     }, 500);
     return () => clearTimeout(saveTimer.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -344,8 +354,7 @@ function Dashboard({ netWorth, liquidNow, totalBalance, totalCardDue, totalLimit
       </div>
       {pendingRecurring.length > 0 && (
         <div style={{ marginTop: 14, background: "#1F3A32", border: "1px solid #2E5A4A", borderRadius: 10, padding: "10px 12px" }}>
-          <div style={{ fontSize: 12.5, color: "#4C9A82", marginBottom: 6 }}>{pendingRecurring.length} recurring item{pendingRecurring.length === 1 ? "" : "s"} not logged this month</div>
-          <button style={s.smallSolidBtn} onClick={() => logRecurringBatch(pendingRecurring, patch)}>Log all for {MONTH_NAMES[new Date().getMonth()]}</button>
+          <div style={{ fontSize: 12.5, color: "#4C9A82" }}>{pendingRecurring.length} recurring item{pendingRecurring.length === 1 ? "" : "s"} not logged this month yet — go to Transactions → Recurring and tap each one when it actually happens.</div>
         </div>
       )}
       {upcoming.length > 0 && (
@@ -375,20 +384,17 @@ function MiniStat({ label, value, sub }) {
   );
 }
 
-function logRecurringBatch(items, patch) {
+function logRecurringOne(item, date, patch) {
   patch((d) => {
     let accounts = d.accounts, cards = d.cards, expenses = [...d.expenses], income = [...d.income];
-    const today = todayISO();
-    items.forEach((r) => {
-      if (r.kind === "income") {
-        accounts = bumpAccount(accounts, r.accountId, r.amount);
-        income.push({ id: uid(), date: today, amount: r.amount, category: r.category, note: r.note, accountId: r.accountId, recurringId: r.id });
-      } else {
-        if (r.source.type === "account") accounts = bumpAccount(accounts, r.source.id, -r.amount);
-        else cards = bumpCardDue(cards, r.source.id, r.amount);
-        expenses.push({ id: uid(), date: today, amount: r.amount, category: r.category, note: r.note, source: r.source, recurringId: r.id });
-      }
-    });
+    if (item.kind === "income") {
+      accounts = bumpAccount(accounts, item.accountId, item.amount);
+      income.push({ id: uid(), date, amount: item.amount, category: item.category, note: item.note, accountId: item.accountId, recurringId: item.id });
+    } else {
+      if (item.source.type === "account") accounts = bumpAccount(accounts, item.source.id, -item.amount);
+      else cards = bumpCardDue(cards, item.source.id, item.amount);
+      expenses.push({ id: uid(), date, amount: item.amount, category: item.category, note: item.note, source: item.source, recurringId: item.id });
+    }
     return { accounts, cards, expenses, income };
   });
 }
@@ -451,6 +457,12 @@ function TransactionsTab({ data, patch }) {
 
   const addRecurring = (r) => { patch({ recurring: [...data.recurring, { id: uid(), ...r }] }); setShowAddRecurring(false); };
   const removeRecurring = (id) => patch({ recurring: data.recurring.filter((r) => r.id !== id) });
+  const [logFor, setLogFor] = useState(null);
+  const thisMonth = monthKey(todayISO());
+  const isLoggedThisMonth = (r) => {
+    const list = r.kind === "income" ? data.income : data.expenses;
+    return list.some((e) => e.recurringId === r.id && monthKey(e.date) === thisMonth);
+  };
 
   return (
     <div>
@@ -488,26 +500,45 @@ function TransactionsTab({ data, patch }) {
       ) : (
         <>
           <RowHead title="Recurring items" onAdd={() => setShowAddRecurring(true)} addLabel="Add recurring" />
-          <div style={{ fontSize: 11.5, color: "#5C6478", marginBottom: 10 }}>These don't log automatically — use "Log all" on the Dashboard each month to add them.</div>
+          <div style={{ fontSize: 11.5, color: "#5C6478", marginBottom: 10 }}>Set these up once. Each month, tap "Log" on the day it actually happens — you pick the date each time, since it's not always the same.</div>
           {data.recurring.length === 0 && <Empty text="No recurring items yet." />}
-          {data.recurring.map((r) => (
-            <div key={r.id} style={s.flowRow}>
-              <div style={{ flex: 1 }}>
-                <div style={s.cardName}>{r.category}</div>
-                <div style={s.cardSub}>{r.kind === "income" ? accountName(r.accountId) : r.source.type === "card" ? cardName(r.source.id) + " (card)" : accountName(r.source.id)}{r.note ? ` · ${r.note}` : ""}</div>
+          {data.recurring.map((r) => {
+            const logged = isLoggedThisMonth(r);
+            return (
+              <div key={r.id} style={s.flowRow}>
+                <div style={{ flex: 1 }}>
+                  <div style={s.cardName}>{r.category}</div>
+                  <div style={s.cardSub}>{r.kind === "income" ? accountName(r.accountId) : r.source.type === "card" ? cardName(r.source.id) + " (card)" : accountName(r.source.id)}{r.note ? ` · ${r.note}` : ""}</div>
+                </div>
+                <div style={{ ...s.mono, color: r.kind === "income" ? "#4C9A82" : "#B85C4A" }}>{r.kind === "income" ? "+" : "-"}{fmt(r.amount)}</div>
+                {logged ? <span style={{ fontSize: 10.5, color: "#4C9A82" }}>logged</span> : <button style={s.payBtn} onClick={() => setLogFor(r)}><Plus size={11} /> Log</button>}
+                <button style={s.iconDeleteBtn} onClick={() => removeRecurring(r.id)}><Trash2 size={13} /></button>
               </div>
-              <div style={{ ...s.mono, color: r.kind === "income" ? "#4C9A82" : "#B85C4A" }}>{r.kind === "income" ? "+" : "-"}{fmt(r.amount)}</div>
-              <button style={s.iconDeleteBtn} onClick={() => removeRecurring(r.id)}><Trash2 size={13} /></button>
-            </div>
-          ))}
+            );
+          })}
           {showAddRecurring && (
             <Modal title="Add recurring item" onClose={() => setShowAddRecurring(false)}>
               <TxForm accounts={data.accounts} cards={data.cards} recurringMode onSave={(kind, v) => addRecurring({ kind, ...v })} />
             </Modal>
           )}
+          {logFor && (
+            <Modal title="Log this occurrence" onClose={() => setLogFor(null)}>
+              <LogRecurringForm item={logFor} onSave={(date) => { logRecurringOne(logFor, date, patch); setLogFor(null); }} />
+            </Modal>
+          )}
         </>
       )}
     </div>
+  );
+}
+
+function LogRecurringForm({ item, onSave }) {
+  const [date, setDate] = useState(todayISO());
+  return (
+    <FormShell onSubmit={() => date && onSave(date)} valid={!!date} submitLabel="Log it">
+      <div style={{ fontSize: 13, marginBottom: 12 }}>{item.category} — {fmt(item.amount)}</div>
+      <Field label="Date this actually happened"><input style={s.input} type="date" value={date} onChange={(e) => setDate(e.target.value)} autoFocus /></Field>
+    </FormShell>
   );
 }
 
@@ -533,10 +564,11 @@ function TxForm({ accounts, cards, initial, initialKind, recurringMode, onSave }
   const valid = amount !== "" && (recurringMode || date) && category && (kind === "income" ? accountId : sourceKey);
   const submit = () => {
     if (!valid) return;
-    if (kind === "income") onSave("income", { amount: Number(amount), date: recurringMode ? undefined : date, category, note: note.trim(), accountId });
+    const dateField = recurringMode ? {} : { date };
+    if (kind === "income") onSave("income", { amount: Number(amount), ...dateField, category, note: note.trim(), accountId });
     else {
       const [type, id] = sourceKey.split(":");
-      onSave("expense", { amount: Number(amount), date: recurringMode ? undefined : date, category, note: note.trim(), source: { type, id } });
+      onSave("expense", { amount: Number(amount), ...dateField, category, note: note.trim(), source: { type, id } });
     }
   };
 
@@ -594,6 +626,7 @@ function CardsTab({ data, patch }) {
   const [editCard, setEditCard] = useState(null);
   const [expanded, setExpanded] = useState(null);
   const [payFor, setPayFor] = useState(null);
+  const [statementFor, setStatementFor] = useState(null);
 
   const removeCard = (id) => {
     patch({
@@ -622,6 +655,10 @@ function CardsTab({ data, patch }) {
       cardPayments: d.cardPayments.filter((x) => x.id !== p.id),
     }));
   };
+  const updateStatement = (cardId, { due, dueDate }) => {
+    patch({ cards: data.cards.map((c) => (c.id === cardId ? { ...c, due, dueDate } : c)) });
+    setStatementFor(null);
+  };
 
   return (
     <div>
@@ -633,13 +670,14 @@ function CardsTab({ data, patch }) {
         const history = [...charges, ...payments].sort((a, b) => new Date(b.date) - new Date(a.date));
         const isOpen = expanded === c.id;
         const days = c.dueDate ? daysUntil(c.dueDate) : null;
+        const available = Number(c.limit || 0) - Number(c.due || 0);
         return (
           <div key={c.id} style={s.card}>
             <div style={s.cardRow} onClick={() => setExpanded(isOpen ? null : c.id)}>
               {isOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
               <div style={{ flex: 1 }}>
                 <div style={s.cardName}>{c.name}</div>
-                <div style={s.cardSub}>Limit {fmt(c.limit)}</div>
+                <div style={s.cardSub}>Limit {fmt(c.limit)} · Available {fmt(available)}</div>
               </div>
               <div style={{ textAlign: "right" }}>
                 <div style={s.mono}>{fmt(c.due)}</div>
@@ -649,7 +687,8 @@ function CardsTab({ data, patch }) {
             </div>
             {isOpen && (
               <div style={s.cardBody}>
-                <div style={{ display: "flex", gap: 12 }}>
+                <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                  <button style={s.smallAddBtn} onClick={() => setStatementFor(c.id)}><Plus size={13} /> Update due & date</button>
                   <button style={s.smallAddBtn} onClick={() => setPayFor(c.id)}><Plus size={13} /> Log payment</button>
                   <button style={{ ...s.smallAddBtn, color: "#8B93A3" }} onClick={() => setEditCard(c)}>Edit card</button>
                 </div>
@@ -676,7 +715,25 @@ function CardsTab({ data, patch }) {
           <PayCardForm accounts={data.accounts} onSave={(v) => logPayment(payFor, v)} />
         </Modal>
       )}
+      {statementFor && (
+        <Modal title="Update due amount & date" onClose={() => setStatementFor(null)}>
+          <StatementForm card={data.cards.find((c) => c.id === statementFor)} onSave={(v) => updateStatement(statementFor, v)} />
+        </Modal>
+      )}
     </div>
+  );
+}
+
+function StatementForm({ card, onSave }) {
+  const [due, setDue] = useState(String(card.due || 0));
+  const [dueDate, setDueDate] = useState(card.dueDate || "");
+  const valid = due !== "";
+  return (
+    <FormShell onSubmit={() => valid && onSave({ due: Number(due), dueDate })} valid={valid} submitLabel="Update">
+      <div style={{ fontSize: 11.5, color: "#5C6478", marginBottom: 12 }}>Use this when your new statement comes in — set exactly what's due and by when, since it's not always the same as last month.</div>
+      <Field label="Amount to pay this cycle (AED)"><input style={s.input} type="number" value={due} onChange={(e) => setDue(e.target.value)} placeholder="1200" autoFocus /></Field>
+      <Field label="Due date"><input style={s.input} type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} /></Field>
+    </FormShell>
   );
 }
 
