@@ -69,14 +69,23 @@
   // Tries to sign in with this PIN; if that fails, tries to create the account
   // with this PIN (this is how the very first PIN gets set). If creation fails
   // because the account already exists, the PIN was just wrong.
-  async function signInWithPin(authObj, pin) {
+  // Safety net: if this device has successfully signed in before, a failed
+  // sign-in should NOT silently create a brand-new blank account — that's
+  // almost always a mistyped PIN, not someone starting fresh.
+  async function signInWithPin(authObj, pin, confirmed) {
     if (PREVIEW_MODE) return { ok: true };
     try {
       await authObj.signInWithEmailAndPassword(PIN_EMAIL, pin);
+      localStorage.setItem("moneyboard_pin_set", "1");
       return { ok: true };
     } catch (signInErr) {
+      const usedBefore = localStorage.getItem("moneyboard_pin_set") === "1";
+      if (usedBefore && !confirmed) {
+        return { ok: false, needsConfirm: true, error: "That doesn't match the PIN this device used before. Double-check it — or confirm to start a brand-new, empty account instead." };
+      }
       try {
         await authObj.createUserWithEmailAndPassword(PIN_EMAIL, pin);
+        localStorage.setItem("moneyboard_pin_set", "1");
         return { ok: true, created: true };
       } catch (createErr) {
         if (createErr.code === "auth/email-already-in-use") return { ok: false, error: "Wrong PIN." };
@@ -166,14 +175,20 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const monthKey = (iso) => iso.slice(0, 7); // "2026-07"
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const INCOME_CATS = ["Salary", "Freelance", "Business", "Other"];
-const EXPENSE_CATS = ["Rent", "Food", "Transport", "Utilities", "Family Support", "Shopping", "Other"];
+const DEFAULT_INCOME_CATS = [
+  { name: "Salary", subs: [] }, { name: "Freelance", subs: [] }, { name: "Business", subs: [] }, { name: "Other", subs: [] },
+];
+const DEFAULT_EXPENSE_CATS = [
+  { name: "Rent", subs: [] }, { name: "Food", subs: [] }, { name: "Transport", subs: [] },
+  { name: "Utilities", subs: [] }, { name: "Family Support", subs: [] }, { name: "Shopping", subs: [] }, { name: "Other", subs: [] },
+];
 
 const emptyState = {
   accounts: [], cards: [], cardPayments: [],
   peopleOwedMe: [], entriesOwedMe: [], peopleIOwe: [], entriesIOwe: [],
-  expenses: [], income: [], recurring: [], // {id, kind:'income'|'expense', amount, category, note, source|accountId}
+  expenses: [], income: [], recurring: [], // {id, kind:'income'|'expense', amount, category, subcategory, note, source|accountId}
   netWorthHistory: [], // {date, value} — one snapshot recorded per day you use the app
+  categories: { income: DEFAULT_INCOME_CATS, expense: DEFAULT_EXPENSE_CATS }, // each: {name, subs:[string]}
 };
 
 function useAuthUser() {
@@ -224,44 +239,6 @@ function useStorage(uidStr) {
   return [data, setData, loaded];
 }
 
-function LoginScreen() {
-  const [pin, setPin] = useState("");
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  const submit = async () => {
-    setError("");
-    if (pin.length < 6) return setError("PIN must be at least 6 digits.");
-    setBusy(true);
-    const res = await signInWithPin(auth, pin);
-    setBusy(false);
-    if (!res.ok) setError(res.error || "Something went wrong.");
-  };
-
-  return (
-    <div style={s.page}>
-      <div style={{ ...s.wrap, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "80vh", gap: 16 }}>
-        <h1 style={s.h1}>Money Board</h1>
-        <p style={{ color: "#7C8698", textAlign: "center", fontSize: 14, maxWidth: 280 }}>
-          Enter your PIN (6+ digits). First time you use this, it sets your PIN — use the same one on any device to get back in.
-        </p>
-        <div style={{ width: "100%", maxWidth: 280 }}>
-          <input
-            style={s.input} type="password" inputMode="numeric" value={pin}
-            onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
-            onKeyDown={(e) => e.key === "Enter" && submit()}
-            placeholder="PIN (6+ digits)" autoFocus
-          />
-          {error && <div style={{ color: "#B85C4A", fontSize: 12.5, marginTop: 8 }}>{error}</div>}
-          <button style={{ ...s.submitBtn, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={submit}>
-            {busy ? "Please wait…" : "Continue"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 const bumpAccount = (accounts, id, delta) => accounts.map((a) => (a.id === id ? { ...a, balance: Number(a.balance || 0) + delta } : a));
 const bumpCardDue = (cards, id, delta) => cards.map((c) => (c.id === id ? { ...c, due: Number(c.due || 0) + delta } : c));
 const bumpStatementDue = (cards, id, delta) => cards.map((c) => (c.id === id ? { ...c, dueAmount: Math.max(0, Number(c.dueAmount || 0) + delta) } : c));
@@ -269,12 +246,74 @@ const applyExpenseDelta = (accounts, cards, source, amount, sign) => {
   if (source.type === "account") return { accounts: bumpAccount(accounts, source.id, sign * -amount), cards };
   return { accounts, cards: bumpCardDue(cards, source.id, sign * amount) };
 };
+function downloadBackupFile(data) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `money-board-backup-${todayISO()}.json`;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
 
 function App() {
   const user = useAuthUser();
-  if (user === undefined) return <div style={s.page}><div style={s.muted}>Loading…</div></div>;
-  if (user === null && !PREVIEW_MODE) return <LoginScreen />;
+  const [authError, setAuthError] = useState("");
+  const [needsMigration, setNeedsMigration] = useState(false);
+
+  useEffect(() => {
+    if (PREVIEW_MODE) return;
+    if (user === null) {
+      autoSignIn(auth).then((res) => {
+        if (res.needsMigration) setNeedsMigration(true);
+        else if (!res.ok) setAuthError(res.error || "Couldn't connect.");
+      });
+    }
+  }, [user]);
+
+  if (needsMigration) return <MigrationScreen onDone={() => setNeedsMigration(false)} />;
+  if (authError) {
+    return <div style={s.page}><div style={{ ...s.muted, color: "#B85C4A" }}>Couldn't sign in automatically: {authError}</div></div>;
+  }
+  if (user === undefined || user === null) return <div style={s.page}><div style={s.muted}>Loading…</div></div>;
   return <MoneyBoard user={user || { uid: "preview-user", displayName: "Preview" }} />;
+}
+
+function MigrationScreen({ onDone }) {
+  const [pin, setPin] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    setError("");
+    setBusy(true);
+    const res = await migrateFromPin(auth, pin);
+    setBusy(false);
+    if (!res.ok) setError(res.error || "Something went wrong.");
+    else onDone();
+  };
+
+  return (
+    <div style={s.page}>
+      <div style={{ ...s.wrap, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "80vh", gap: 16 }}>
+        <h1 style={s.h1}>Money Board</h1>
+        <p style={{ color: "#7C8698", textAlign: "center", fontSize: 14, maxWidth: 280 }}>
+          One-time step: enter your old PIN to switch this account to no-PIN login for good. You won't need to do this again.
+        </p>
+        <div style={{ width: "100%", maxWidth: 280 }}>
+          <input
+            style={s.input} type="password" inputMode="numeric" value={pin}
+            onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
+            onKeyDown={(e) => e.key === "Enter" && submit()}
+            placeholder="Your old PIN" autoFocus
+          />
+          {error && <div style={{ color: "#B85C4A", fontSize: 12.5, marginTop: 8 }}>{error}</div>}
+          <button style={{ ...s.submitBtn, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={submit}>
+            {busy ? "Please wait…" : "Finish setup"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function MoneyBoard({ user }) {
@@ -289,6 +328,19 @@ function MoneyBoard({ user }) {
     const btn = row.querySelector(`[data-tabid="${tab}"]`);
     if (btn) btn.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
   }, [tab]);
+
+  const [justBackedUp, setJustBackedUp] = useState(false);
+  useEffect(() => {
+    if (!loaded || PREVIEW_MODE) return;
+    const today = todayISO();
+    const last = localStorage.getItem("moneyboard_last_autobackup");
+    if (last !== today) {
+      downloadBackupFile(data);
+      localStorage.setItem("moneyboard_last_autobackup", today);
+      setJustBackedUp(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded]);
 
   const totalCardDue = data.cards.reduce((s2, c) => s2 + Number(c.due || 0), 0);
   const totalLimit = data.cards.reduce((s2, c) => s2 + Number(c.limit || 0), 0);
@@ -323,11 +375,15 @@ function MoneyBoard({ user }) {
       <div style={s.wrap}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
           <h1 style={s.h1}>Money Board</h1>
-          {!PREVIEW_MODE && <button className="no-print" style={s.logoutBtn} onClick={() => signOut(auth)}><LogOut size={13} /> Lock</button>}
         </div>
         {PREVIEW_MODE && (
           <div className="no-print" style={{ background: "#3A241F", border: "1px solid #B85C4A", color: "#E8B4A8", fontSize: 12, borderRadius: 8, padding: "9px 12px", marginBottom: 14 }}>
             Preview mode — nothing is saved yet. {typeof firebase === "undefined" ? "Firebase scripts didn't load (check your internet/network)." : "Add your Firebase keys at the top of this file, then re-upload, to save your data for real."}
+          </div>
+        )}
+        {justBackedUp && (
+          <div className="no-print" style={{ background: "#1F3A32", border: "1px solid #2E5A4A", color: "#8FC9B3", fontSize: 12, borderRadius: 8, padding: "9px 12px", marginBottom: 14 }}>
+            Today's backup downloaded to your device — move it to Google Drive so it's safe if you lose this device.
           </div>
         )}
         {!loaded ? <div style={s.muted}>Loading…</div> : (
@@ -505,7 +561,7 @@ function QuickAddDetail({ action, data, patch, onDone, onBack }) {
       <div>
         <BackLink />
         <TxForm
-          accounts={data.accounts} cards={data.cards} initialKind={kind} lockKind
+          accounts={data.accounts} cards={data.cards} categories={data.categories} initialKind={kind} lockKind
           onSave={(k, v) => {
             patch((d) => {
               let accounts = d.accounts, cards = d.cards;
@@ -726,6 +782,7 @@ function TransactionsTab({ data, patch }) {
   const [showAdd, setShowAdd] = useState(false);
   const [editEntry, setEditEntry] = useState(null); // {entry, kind}
   const [showAddRecurring, setShowAddRecurring] = useState(false);
+  const [showCategories, setShowCategories] = useState(false);
 
   const accountName = (id) => data.accounts.find((a) => a.id === id)?.name || "—";
   const cardName = (id) => data.cards.find((c) => c.id === id)?.name || "—";
@@ -815,6 +872,18 @@ function TransactionsTab({ data, patch }) {
       {view === "all" ? (
         <>
           <RowHead title="Transactions" onAdd={() => setShowAdd(true)} addLabel="Add" />
+          {all.length > 0 && (
+            <button
+              style={{ ...s.smallAddBtn, color: "#B85C4A", marginBottom: 10 }}
+              onClick={() => {
+                if (confirm(`Clear all ${all.length} logged transactions? Your account balances, card dues, and debts all stay exactly as they are — this only clears the transaction list itself. Note: this also clears past months from Reports (Earned/Spent history), since those are calculated from these same entries. This can't be undone.`)) {
+                  patch({ expenses: [], income: [] });
+                }
+              }}
+            >
+              Reset transaction list (start this month fresh)
+            </button>
+          )}
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
             <input style={s.input} value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search notes or category…" />
             <div style={{ display: "flex", gap: 8 }}>
@@ -844,13 +913,18 @@ function TransactionsTab({ data, patch }) {
           ))}
           {showAdd && (
             <Modal title="Add transaction" onClose={() => setShowAdd(false)}>
-              <TxForm accounts={data.accounts} cards={data.cards} onSave={addTx} />
+              <TxForm accounts={data.accounts} cards={data.cards} categories={data.categories} onManageCategories={() => setShowCategories(true)} onSave={addTx} />
             </Modal>
           )}
           {editEntry && (
             <Modal title="Edit transaction" onClose={() => setEditEntry(null)}>
-              <TxForm accounts={data.accounts} cards={data.cards} initial={editEntry.entry} initialKind={editEntry.kind}
+              <TxForm accounts={data.accounts} cards={data.cards} categories={data.categories} onManageCategories={() => setShowCategories(true)} initial={editEntry.entry} initialKind={editEntry.kind}
                 onSave={(kind, v) => saveEdit(kind, editEntry.entry, v)} />
+            </Modal>
+          )}
+          {showCategories && (
+            <Modal title="Manage categories" onClose={() => setShowCategories(false)}>
+              <CategoryManager categories={data.categories} patch={patch} />
             </Modal>
           )}
         </>
@@ -875,7 +949,7 @@ function TransactionsTab({ data, patch }) {
           })}
           {showAddRecurring && (
             <Modal title="Add recurring item" onClose={() => setShowAddRecurring(false)}>
-              <TxForm accounts={data.accounts} cards={data.cards} recurringMode onSave={(kind, v) => addRecurring({ kind, ...v })} />
+              <TxForm accounts={data.accounts} cards={data.cards} categories={data.categories} recurringMode onSave={(kind, v) => addRecurring({ kind, ...v })} />
             </Modal>
           )}
           {logFor && (
@@ -885,7 +959,7 @@ function TransactionsTab({ data, patch }) {
           )}
           {editRecurringFor && (
             <Modal title="Edit recurring item" onClose={() => setEditRecurringFor(null)}>
-              <TxForm accounts={data.accounts} cards={data.cards} recurringMode initial={editRecurringFor} initialKind={editRecurringFor.kind}
+              <TxForm accounts={data.accounts} cards={data.cards} categories={data.categories} recurringMode initial={editRecurringFor} initialKind={editRecurringFor.kind}
                 onSave={(kind, v) => saveRecurringEdit(editRecurringFor, kind, v)} />
             </Modal>
           )}
@@ -905,11 +979,78 @@ function LogRecurringForm({ item, onSave }) {
   );
 }
 
-function TxForm({ accounts, cards, initial, initialKind, recurringMode, lockKind, onSave }) {
+function CategoryManager({ categories, patch }) {
+  const [kind, setKind] = useState("expense");
+  const [newCat, setNewCat] = useState("");
+  const [subInputFor, setSubInputFor] = useState(null);
+  const [newSub, setNewSub] = useState("");
+  const list = categories[kind];
+
+  const addCategory = () => {
+    const name = newCat.trim();
+    if (!name || list.some((c) => c.name.toLowerCase() === name.toLowerCase())) return;
+    patch({ categories: { ...categories, [kind]: [...list, { name, subs: [] }] } });
+    setNewCat("");
+  };
+  const removeCategory = (name) => {
+    if (!confirm(`Delete "${name}"? Past transactions keep this category name, but it won't be selectable anymore.`)) return;
+    patch({ categories: { ...categories, [kind]: list.filter((c) => c.name !== name) } });
+  };
+  const addSub = (catName) => {
+    const sub = newSub.trim();
+    if (!sub) return;
+    patch({ categories: { ...categories, [kind]: list.map((c) => (c.name === catName ? { ...c, subs: c.subs.includes(sub) ? c.subs : [...c.subs, sub] } : c)) } });
+    setNewSub(""); setSubInputFor(null);
+  };
+  const removeSub = (catName, sub) => {
+    patch({ categories: { ...categories, [kind]: list.map((c) => (c.name === catName ? { ...c, subs: c.subs.filter((s) => s !== sub) } : c)) } });
+  };
+
+  return (
+    <div>
+      <div style={{ ...s.toggleRow, marginBottom: 14 }}>
+        <button style={{ ...s.toggleBtn, ...(kind === "expense" ? s.toggleActiveExpense : {}) }} onClick={() => setKind("expense")}>Expense</button>
+        <button style={{ ...s.toggleBtn, ...(kind === "income" ? s.toggleActiveIncome : {}) }} onClick={() => setKind("income")}>Income</button>
+      </div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+        <input style={s.input} value={newCat} onChange={(e) => setNewCat(e.target.value)} placeholder="New category name" onKeyDown={(e) => e.key === "Enter" && addCategory()} />
+        <button style={s.smallSolidBtn} onClick={addCategory}>Add</button>
+      </div>
+      {list.map((c) => (
+        <div key={c.name} style={{ marginBottom: 10, background: "#1A1F29", border: "1px solid #242B38", borderRadius: 10, padding: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ flex: 1, fontSize: 13.5, fontWeight: 600 }}>{c.name}</span>
+            <button style={{ ...s.smallAddBtn, padding: 0 }} onClick={() => setSubInputFor(subInputFor === c.name ? null : c.name)}>+ sub</button>
+            <button style={s.iconDeleteBtn} onClick={() => removeCategory(c.name)}><Trash2 size={13} /></button>
+          </div>
+          {c.subs.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+              {c.subs.map((sub) => (
+                <span key={sub} style={{ display: "flex", alignItems: "center", gap: 4, background: "#242B38", borderRadius: 6, padding: "3px 8px", fontSize: 11.5, color: "#8B93A3" }}>
+                  {sub} <span style={{ cursor: "pointer", color: "#B85C4A" }} onClick={() => removeSub(c.name, sub)}>✕</span>
+                </span>
+              ))}
+            </div>
+          )}
+          {subInputFor === c.name && (
+            <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+              <input style={s.input} value={newSub} onChange={(e) => setNewSub(e.target.value)} placeholder="Subcategory name" autoFocus onKeyDown={(e) => e.key === "Enter" && addSub(c.name)} />
+              <button style={s.smallSolidBtn} onClick={() => addSub(c.name)}>Add</button>
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function TxForm({ accounts, cards, categories, initial, initialKind, recurringMode, lockKind, onManageCategories, onSave }) {
   const [kind, setKind] = useState(initialKind || "expense");
   const [amount, setAmount] = useState(initial ? String(initial.amount) : "");
   const [date, setDate] = useState(initial ? initial.date : todayISO());
-  const [category, setCategory] = useState(initial ? initial.category : EXPENSE_CATS[0]);
+  const cats = kind === "income" ? categories.income : categories.expense;
+  const [category, setCategory] = useState(initial ? initial.category : cats[0]?.name || "");
+  const [subcategory, setSubcategory] = useState(initial?.subcategory || "");
   const [note, setNote] = useState(initial ? initial.note || "" : "");
   const expenseOptions = [...accounts.map((a) => ({ key: `account:${a.id}`, label: `${a.name} (${fmt(a.balance)})` })), ...cards.map((c) => ({ key: `card:${c.id}`, label: `${c.name} (card)` }))];
   const initialSourceKey = initial && initialKind === "expense" ? `${initial.source.type}:${initial.source.id}` : expenseOptions[0]?.key || "";
@@ -917,10 +1058,10 @@ function TxForm({ accounts, cards, initial, initialKind, recurringMode, lockKind
   const [accountId, setAccountId] = useState(initial && initialKind === "income" ? initial.accountId : accounts[0]?.id || "");
 
   useEffect(() => {
-    if (!initial) setCategory((kind === "income" ? INCOME_CATS : EXPENSE_CATS)[0]);
+    if (!initial) { const c = (kind === "income" ? categories.income : categories.expense)[0]; setCategory(c?.name || ""); setSubcategory(""); }
   }, [kind]);
 
-  const cats = kind === "income" ? INCOME_CATS : EXPENSE_CATS;
+  const subOptions = cats.find((c) => c.name === category)?.subs || [];
   const needsDest = kind === "income" ? accounts.length > 0 : expenseOptions.length > 0;
   if (!needsDest) return <Empty text={kind === "income" ? "Add a bank or cash account first, under Wallet." : "Add a bank/cash account or a card first, under Wallet."} />;
 
@@ -928,10 +1069,11 @@ function TxForm({ accounts, cards, initial, initialKind, recurringMode, lockKind
   const submit = () => {
     if (!valid) return;
     const dateField = recurringMode ? {} : { date };
-    if (kind === "income") onSave("income", { amount: Number(amount), ...dateField, category, note: note.trim(), accountId });
+    const subField = subcategory ? { subcategory } : {};
+    if (kind === "income") onSave("income", { amount: Number(amount), ...dateField, category, ...subField, note: note.trim(), accountId });
     else {
       const [type, id] = sourceKey.split(":");
-      onSave("expense", { amount: Number(amount), ...dateField, category, note: note.trim(), source: { type, id } });
+      onSave("expense", { amount: Number(amount), ...dateField, category, ...subField, note: note.trim(), source: { type, id } });
     }
   };
 
@@ -948,10 +1090,19 @@ function TxForm({ accounts, cards, initial, initialKind, recurringMode, lockKind
       <Field label="Amount (AED)"><input style={s.input} type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="500" autoFocus /></Field>
       {!recurringMode && <Field label="Date"><input style={s.input} type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>}
       <Field label="Category">
-        <select style={s.input} value={category} onChange={(e) => setCategory(e.target.value)}>
-          {cats.map((c) => <option key={c} value={c}>{c}</option>)}
+        <select style={s.input} value={category} onChange={(e) => { setCategory(e.target.value); setSubcategory(""); }}>
+          {cats.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
         </select>
       </Field>
+      {subOptions.length > 0 && (
+        <Field label="Subcategory (optional)">
+          <select style={s.input} value={subcategory} onChange={(e) => setSubcategory(e.target.value)}>
+            <option value="">None</option>
+            {subOptions.map((sub) => <option key={sub} value={sub}>{sub}</option>)}
+          </select>
+        </Field>
+      )}
+      {onManageCategories && <button type="button" style={{ ...s.smallAddBtn, marginBottom: 10 }} onClick={onManageCategories}>Manage categories</button>}
       {kind === "income" ? (
         <Field label="Deposit into">
           <select style={s.input} value={accountId} onChange={(e) => setAccountId(e.target.value)}>
@@ -1674,14 +1825,7 @@ function ReportsTab({ data, setData }) {
   const [month, setMonth] = useState(now.getMonth());
   const fileInputRef = useRef(null);
 
-  const exportData = () => {
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = `money-board-backup-${todayISO()}.json`;
-    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
+  const exportData = () => downloadBackupFile(data);
   const importData = (e) => {
     const file = e.target.files[0];
     if (!file) return;
