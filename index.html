@@ -175,7 +175,7 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const monthKey = (iso) => iso.slice(0, 7); // "2026-07"
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const APP_VERSION = "2026-09-23.1"; // bumped every time Claude gives you a new file — check this matches what's live
+const APP_VERSION = "2026-09-23.2"; // bumped every time Claude gives you a new file — check this matches what's live
 const DEFAULT_INCOME_CATS = [
   { name: "Salary", subs: [] }, { name: "Freelance", subs: [] }, { name: "Business", subs: [] }, { name: "Other", subs: [] },
 ];
@@ -1147,10 +1147,16 @@ function CardsTab({ data, patch }) {
 
   const removeCard = (id) => {
     if (!confirm("Delete this card and its whole charge/payment history? This can't be undone.")) return;
-    patch({
-      cards: data.cards.filter((c) => c.id !== id),
-      cardPayments: data.cardPayments.filter((p) => p.cardId !== id),
-      expenses: data.expenses.filter((e) => !(e.source.type === "card" && e.source.id === id)),
+    patch((d) => {
+      // reverse every payment made from an account toward this card, so deleting it doesn't leave that account permanently short
+      let accounts = d.accounts;
+      d.cardPayments.filter((p) => p.cardId === id).forEach((p) => { accounts = bumpAccount(accounts, p.accountId, p.amount); });
+      return {
+        accounts,
+        cards: d.cards.filter((c) => c.id !== id),
+        cardPayments: d.cardPayments.filter((p) => p.cardId !== id),
+        expenses: d.expenses.filter((e) => !(e.source.type === "card" && e.source.id === id)),
+      };
     });
   };
   const saveCard = (v) => {
@@ -1455,7 +1461,16 @@ function PeopleTab({ title, tone, kind, data, patch }) {
 
   const removePerson = (id) => {
     if (!confirm("Delete this person and all their entries? This can't be undone.")) return;
-    patch({ [peopleKey]: people.filter((p) => p.id !== id), [entriesKey]: entries.filter((e) => e.personId !== id) });
+    patch((d) => {
+      const theirEntries = d[entriesKey].filter((e) => e.personId === id);
+      let accounts = d.accounts, cards = d.cards;
+      theirEntries.forEach((e) => {
+        const src = e.source || (e.sourceAccountId ? { type: "account", id: e.sourceAccountId } : null);
+        ({ accounts, cards } = applySource(accounts, cards, src, e.amount, -1));
+        if (e.paid && e.paidAccountId) accounts = bumpAccount(accounts, e.paidAccountId, kind === "owedMe" ? -e.amount : e.amount);
+      });
+      return { accounts, cards, [peopleKey]: people.filter((p) => p.id !== id), [entriesKey]: d[entriesKey].filter((e) => e.personId !== id) };
+    });
   };
   const savePerson = (name) => {
     if (editPerson) patch({ [peopleKey]: people.map((p) => (p.id === editPerson.id ? { ...p, name } : p)) });
