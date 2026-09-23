@@ -175,6 +175,7 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const monthKey = (iso) => iso.slice(0, 7); // "2026-07"
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const APP_VERSION = "2026-09-23.1"; // bumped every time Claude gives you a new file — check this matches what's live
 const DEFAULT_INCOME_CATS = [
   { name: "Salary", subs: [] }, { name: "Freelance", subs: [] }, { name: "Business", subs: [] }, { name: "Other", subs: [] },
 ];
@@ -413,6 +414,7 @@ function MoneyBoard({ user }) {
             {tab === "reports" && <ReportsTab data={data} setData={setData} />}
           </>
         )}
+        <div className="no-print" style={{ textAlign: "center", fontSize: 10.5, color: "#3A4150", marginTop: 24 }}>Money Board {APP_VERSION}</div>
       </div>
     </div>
   );
