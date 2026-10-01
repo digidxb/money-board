@@ -175,7 +175,7 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const monthKey = (iso) => iso.slice(0, 7); // "2026-07"
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const APP_VERSION = "2026-09-23.2"; // bumped every time Claude gives you a new file — check this matches what's live
+const APP_VERSION = "2026-09-23.4"; // bumped every time Claude gives you a new file — check this matches what's live
 const DEFAULT_INCOME_CATS = [
   { name: "Salary", subs: [] }, { name: "Freelance", subs: [] }, { name: "Business", subs: [] }, { name: "Other", subs: [] },
 ];
@@ -520,6 +520,7 @@ function MiniStat({ label, value, sub }) {
 
 // ---------------- Quick Add ----------------
 const QUICK_ACTIONS = [
+  { key: "voice", label: "🎤 Say it out loud" },
   { key: "spend", label: "Spent money" },
   { key: "earn", label: "Earned money" },
   { key: "payCard", label: "Paid a card" },
@@ -557,6 +558,91 @@ function QuickAddButton({ data, patch }) {
 function QuickAddDetail({ action, data, patch, onDone, onBack }) {
   const BackLink = () => <button type="button" style={{ ...s.smallAddBtn, color: "#8B93A3", marginBottom: 10 }} onClick={onBack}>← choose a different action</button>;
 
+  const saveTx = (k, v) => {
+    patch((d) => {
+      let accounts = d.accounts, cards = d.cards;
+      if (k === "income") accounts = bumpAccount(accounts, v.accountId, v.amount);
+      else ({ accounts, cards } = applyExpenseDelta(accounts, cards, v.source, v.amount, 1));
+      const key = k === "income" ? "income" : "expenses";
+      return { accounts, cards, [key]: [...d[key], { id: uid(), ...v }] };
+    });
+    onDone();
+  };
+
+  const savePayCard = ({ cardId, amount, date, accountId }) => {
+    patch((d) => ({
+      cards: bumpStatementDue(bumpCardDue(d.cards, cardId, -amount), cardId, -amount),
+      accounts: bumpAccount(d.accounts, accountId, -amount),
+      cardPayments: [...d.cardPayments, { id: uid(), cardId, accountId, amount, date }],
+    }));
+    onDone();
+  };
+
+  const savePersonEntry = (kind) => ({ personId, newPersonName, amount, date, details, source }) => {
+    const peopleKey = kind === "owedMe" ? "peopleOwedMe" : "peopleIOwe";
+    const entriesKey = kind === "owedMe" ? "entriesOwedMe" : "entriesIOwe";
+    patch((d) => {
+      let people = d[peopleKey];
+      let pid = personId;
+      if (!pid && newPersonName) { const p = { id: uid(), name: newPersonName.trim() }; people = [...people, p]; pid = p.id; }
+      const dir = kind === "owedMe" ? -1 : 1;
+      let accounts = d.accounts, cards = d.cards;
+      if (source) {
+        if (source.type === "account") accounts = bumpAccount(accounts, source.id, dir * amount);
+        else cards = bumpCardDue(cards, source.id, -dir * amount);
+      }
+      return { accounts, cards, [peopleKey]: people, [entriesKey]: [...d[entriesKey], { id: uid(), personId: pid, amount, date, details, source: source || null, paid: false }] };
+    });
+    onDone();
+  };
+
+  const saveSettle = (kind) => ({ personId, personName, amount, accountId, date }) => {
+    const entriesKey = kind === "owedMe" ? "entriesOwedMe" : "entriesIOwe";
+    const unpaid = data[entriesKey].filter((e) => e.personId === personId && !e.paid).sort((a, b) => new Date(a.date) - new Date(b.date));
+    const outstanding = unpaid.reduce((sum, e) => sum + Number(e.amount || 0), 0);
+    const extra = amount - outstanding;
+    patch((d) => {
+      let accounts = accountId ? bumpAccount(d.accounts, accountId, kind === "owedMe" ? amount : -amount) : d.accounts;
+      let remaining = amount;
+      const newEntries = [];
+      unpaid.forEach((e) => {
+        if (remaining <= 0.01) { newEntries.push(e); return; }
+        if (remaining >= e.amount - 0.01) { newEntries.push({ ...e, paid: true, paidAccountId: accountId || null, paidDate: date }); remaining -= e.amount; }
+        else { newEntries.push({ ...e, id: uid(), amount: remaining, paid: true, paidAccountId: accountId || null, paidDate: date, mergeBackId: e.id }); newEntries.push({ ...e, amount: e.amount - remaining }); remaining = 0; }
+      });
+      const updatedEntries = d[entriesKey].filter((e) => !(e.personId === personId && !e.paid)).concat(newEntries);
+      const result = { accounts, [entriesKey]: updatedEntries };
+      if (extra > 0.01) {
+        const oppositePeopleKey = kind === "owedMe" ? "peopleIOwe" : "peopleOwedMe";
+        const oppositeEntriesKey = kind === "owedMe" ? "entriesIOwe" : "entriesOwedMe";
+        let oppositePeople = d[oppositePeopleKey];
+        let match = oppositePeople.find((p) => p.name.toLowerCase() === personName.toLowerCase());
+        if (!match) { match = { id: uid(), name: personName }; oppositePeople = [...oppositePeople, match]; }
+        result[oppositePeopleKey] = oppositePeople;
+        result[oppositeEntriesKey] = [...d[oppositeEntriesKey], { id: uid(), personId: match.id, amount: extra, date, details: "Overpayment from settling up", paid: false, source: null }];
+      }
+      return result;
+    });
+    onDone();
+  };
+
+  const withOutstanding = (kind) => {
+    const peopleKey = kind === "owedMe" ? "peopleOwedMe" : "peopleIOwe";
+    const entriesKey = kind === "owedMe" ? "entriesOwedMe" : "entriesIOwe";
+    return data[peopleKey]
+      .map((p) => ({ ...p, outstanding: data[entriesKey].filter((e) => e.personId === p.id && !e.paid).reduce((s2, e) => s2 + Number(e.amount || 0), 0) }))
+      .filter((p) => p.outstanding > 0.01);
+  };
+
+  if (action === "voice") {
+    return (
+      <div>
+        <BackLink />
+        <VoiceAddForm data={data} onSaveTx={saveTx} onSavePayCard={savePayCard} onSavePersonEntry={savePersonEntry} onSaveSettle={saveSettle} withOutstanding={withOutstanding} />
+      </div>
+    );
+  }
+
   if (action === "spend" || action === "earn") {
     const kind = action === "spend" ? "expense" : "income";
     return (
@@ -581,105 +667,188 @@ function QuickAddDetail({ action, data, patch, onDone, onBack }) {
 
   if (action === "payCard") {
     if (data.cards.length === 0) return <div><BackLink /><Empty text="Add a card first, under Wallet." /></div>;
-    return (
-      <div>
-        <BackLink />
-        <QuickPayCardForm
-          cards={data.cards} accounts={data.accounts}
-          onSave={({ cardId, amount, date, accountId }) => {
-            patch((d) => ({
-              cards: bumpStatementDue(bumpCardDue(d.cards, cardId, -amount), cardId, -amount),
-              accounts: bumpAccount(d.accounts, accountId, -amount),
-              cardPayments: [...d.cardPayments, { id: uid(), cardId, accountId, amount, date }],
-            }));
-            onDone();
-          }}
-        />
-      </div>
-    );
+    return <div><BackLink /><QuickPayCardForm cards={data.cards} accounts={data.accounts} onSave={savePayCard} /></div>;
   }
 
   if (action === "lend" || action === "borrow") {
     const kind = action === "lend" ? "owedMe" : "iOwe";
     const peopleKey = kind === "owedMe" ? "peopleOwedMe" : "peopleIOwe";
-    const entriesKey = kind === "owedMe" ? "entriesOwedMe" : "entriesIOwe";
     return (
       <div>
         <BackLink />
-        <QuickPersonEntryForm
-          people={data[peopleKey]} accounts={data.accounts} cards={kind === "owedMe" ? data.cards : []} kind={kind}
-          onSave={({ personId, newPersonName, amount, date, details, source }) => {
-            patch((d) => {
-              let people = d[peopleKey];
-              let pid = personId;
-              if (!pid && newPersonName) { const p = { id: uid(), name: newPersonName.trim() }; people = [...people, p]; pid = p.id; }
-              const dir = kind === "owedMe" ? -1 : 1;
-              let accounts = d.accounts, cards = d.cards;
-              if (source) {
-                if (source.type === "account") accounts = bumpAccount(accounts, source.id, dir * amount);
-                else cards = bumpCardDue(cards, source.id, -dir * amount);
-              }
-              return { accounts, cards, [peopleKey]: people, [entriesKey]: [...d[entriesKey], { id: uid(), personId: pid, amount, date, details, source: source || null, paid: false }] };
-            });
-            onDone();
-          }}
-        />
+        <QuickPersonEntryForm people={data[peopleKey]} accounts={data.accounts} cards={kind === "owedMe" ? data.cards : []} kind={kind} onSave={savePersonEntry(kind)} />
       </div>
     );
   }
 
   if (action === "receive" || action === "payBack") {
     const kind = action === "receive" ? "owedMe" : "iOwe";
-    const peopleKey = kind === "owedMe" ? "peopleOwedMe" : "peopleIOwe";
-    const entriesKey = kind === "owedMe" ? "entriesOwedMe" : "entriesIOwe";
-    const withOutstanding = data[peopleKey]
-      .map((p) => ({ ...p, outstanding: data[entriesKey].filter((e) => e.personId === p.id && !e.paid).reduce((s2, e) => s2 + Number(e.amount || 0), 0) }))
-      .filter((p) => p.outstanding > 0.01);
-    if (withOutstanding.length === 0) return <div><BackLink /><Empty text="No one has an outstanding balance here right now." /></div>;
-    return (
-      <div>
-        <BackLink />
-        <QuickSettleForm
-          people={withOutstanding} accounts={data.accounts} kind={kind}
-          onSave={({ personId, personName, amount, accountId, date }) => {
-            const unpaid = data[entriesKey].filter((e) => e.personId === personId && !e.paid).sort((a, b) => new Date(a.date) - new Date(b.date));
-            const outstanding = unpaid.reduce((sum, e) => sum + Number(e.amount || 0), 0);
-            const extra = amount - outstanding;
-            patch((d) => {
-              let accounts = accountId ? bumpAccount(d.accounts, accountId, kind === "owedMe" ? amount : -amount) : d.accounts;
-              let remaining = amount;
-              const newEntries = [];
-              unpaid.forEach((e) => {
-                if (remaining <= 0.01) { newEntries.push(e); return; }
-                if (remaining >= e.amount - 0.01) { newEntries.push({ ...e, paid: true, paidAccountId: accountId || null, paidDate: date }); remaining -= e.amount; }
-                else { newEntries.push({ ...e, id: uid(), amount: remaining, paid: true, paidAccountId: accountId || null, paidDate: date, mergeBackId: e.id }); newEntries.push({ ...e, amount: e.amount - remaining }); remaining = 0; }
-              });
-              const updatedEntries = d[entriesKey].filter((e) => !(e.personId === personId && !e.paid)).concat(newEntries);
-              const result = { accounts, [entriesKey]: updatedEntries };
-              if (extra > 0.01) {
-                const oppositePeopleKey = kind === "owedMe" ? "peopleIOwe" : "peopleOwedMe";
-                const oppositeEntriesKey = kind === "owedMe" ? "entriesIOwe" : "entriesOwedMe";
-                let oppositePeople = d[oppositePeopleKey];
-                let match = oppositePeople.find((p) => p.name.toLowerCase() === personName.toLowerCase());
-                if (!match) { match = { id: uid(), name: personName }; oppositePeople = [...oppositePeople, match]; }
-                result[oppositePeopleKey] = oppositePeople;
-                result[oppositeEntriesKey] = [...d[oppositeEntriesKey], { id: uid(), personId: match.id, amount: extra, date, details: "Overpayment from settling up", paid: false, source: null }];
-              }
-              return result;
-            });
-            onDone();
-          }}
-        />
-      </div>
-    );
+    const eligible = withOutstanding(kind);
+    if (eligible.length === 0) return <div><BackLink /><Empty text="No one has an outstanding balance here right now." /></div>;
+    return <div><BackLink /><QuickSettleForm people={eligible} accounts={data.accounts} kind={kind} onSave={saveSettle(kind)} /></div>;
   }
 
   return null;
 }
 
-function QuickPayCardForm({ cards, accounts, onSave }) {
-  const [cardId, setCardId] = useState(cards[0]?.id || "");
-  const [amount, setAmount] = useState("");
+// Best-effort parse of a spoken sentence into transaction fields. Never trusted
+// blindly — always shown back to the person in an editable form before saving.
+// Best-effort detection of WHICH kind of transaction was described, then
+// extracts the relevant fields for that kind. Never trusted blindly — the
+// person always sees an editable, pre-filled form before anything saves.
+function parseVoiceIntent(text, data) {
+  const lower = text.toLowerCase();
+  const amountMatch = lower.match(/(\d+(\.\d+)?)/);
+  const amount = amountMatch ? parseFloat(amountMatch[1]) : "";
+
+  const nameHit = (name) => { const n = name.toLowerCase(); return lower.includes(n) || lower.includes(n.split(" ")[0]); };
+  const cardMention = data.cards.find((c) => nameHit(c.name));
+  const accMention = data.accounts.find((a) => nameHit(a.name));
+  const owedMePerson = data.peopleOwedMe.find((p) => nameHit(p.name));
+  const iOwePerson = data.peopleIOwe.find((p) => nameHit(p.name));
+
+  // Paying off a credit card bill (not just spending with the card)
+  if (cardMention) {
+    const billWords = /\b(bill|paid off|pay off|card payment)\b/;
+    const paidCardDirectly = /\bpaid\b/.test(lower) && !/\b(from|with|using)\b/.test(lower) && lower.includes(`paid ${cardMention.name.toLowerCase().split(" ")[0]}`);
+    if (billWords.test(lower) || paidCardDirectly) {
+      return { type: "payCard", amount, cardId: cardMention.id, text };
+    }
+  }
+
+  // Someone paying back what they owe you
+  if (owedMePerson && /\b(paid me|pay me|paid back|gave me back|received)\b/.test(lower)) {
+    return { type: "receive", amount, personId: owedMePerson.id, text };
+  }
+
+  // You paying back what you owe someone
+  if (iOwePerson && /\bback\b/.test(lower) && /\b(paid|pay)\b/.test(lower)) {
+    return { type: "payBack", amount, personId: iOwePerson.id, text };
+  }
+
+  // You lending money out
+  if (/\b(gave|lent|loaned|lend)\b/.test(lower) && !/\bgave me\b/.test(lower)) {
+    let source = null;
+    if (cardMention) source = `card:${cardMention.id}`;
+    else if (accMention) source = `account:${accMention.id}`;
+    return { type: "lend", amount, personId: owedMePerson?.id || null, newPersonName: "", sourceKey: source || "", details: text, text };
+  }
+
+  // Money you borrowed in
+  if (/\bborrowed\b/.test(lower) || /\bgave me\b/.test(lower)) {
+    const source = accMention ? `account:${accMention.id}` : "";
+    return { type: "borrow", amount, personId: iOwePerson?.id || null, newPersonName: "", sourceKey: source, details: text, text };
+  }
+
+  // Default: plain income or expense
+  const incomeWords = ["earned", "earn", "received", "receive", "income", "salary", "credited", "got paid"];
+  const kind = incomeWords.some((w) => lower.includes(w)) ? "income" : "expense";
+  let sourceKey = "", accountId = "";
+  if (kind === "expense") {
+    if (cardMention) sourceKey = `card:${cardMention.id}`;
+    else if (accMention) sourceKey = `account:${accMention.id}`;
+  } else if (accMention) accountId = accMention.id;
+
+  const cats = kind === "income" ? data.categories.income : data.categories.expense;
+  let category = "", subcategory = "";
+  for (const c of cats) {
+    if (lower.includes(c.name.toLowerCase())) { category = c.name; break; }
+    const sub = c.subs.find((s) => lower.includes(s.toLowerCase()));
+    if (sub) { category = c.name; subcategory = sub; break; }
+  }
+  if (!category && kind === "expense") {
+    const hints = {
+      petrol: "Transport", fuel: "Transport", gas: "Transport", taxi: "Transport", uber: "Transport", careem: "Transport", parking: "Transport",
+      food: "Food", lunch: "Food", dinner: "Food", breakfast: "Food", grocery: "Food", groceries: "Food", restaurant: "Food",
+      rent: "Rent", electricity: "Utilities", water: "Utilities", bill: "Utilities", internet: "Utilities", shopping: "Shopping",
+    };
+    for (const [word, cat] of Object.entries(hints)) {
+      if (lower.includes(word) && cats.some((c) => c.name === cat)) { category = cat; break; }
+    }
+  }
+  if (!category) category = cats[0]?.name || "";
+
+  return { type: kind, kind, amount, category, subcategory, sourceKey, accountId, note: text, text };
+}
+
+function VoiceAddForm({ data, onSaveTx, onSavePayCard, onSavePersonEntry, onSaveSettle, withOutstanding }) {
+  const [listening, setListening] = useState(false);
+  const [transcript, setTranscript] = useState("");
+  const [parsed, setParsed] = useState(null);
+  const [error, setError] = useState("");
+  const recognitionRef = useRef(null);
+  const SR = typeof window !== "undefined" ? (window.SpeechRecognition || window.webkitSpeechRecognition) : null;
+
+  const startListening = () => {
+    if (!SR) { setError("Voice input isn't supported in this browser — try Chrome."); return; }
+    const recognition = new SR();
+    recognition.lang = "en-US";
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+    recognitionRef.current = recognition;
+    setTranscript(""); setParsed(null); setError("");
+    recognition.onresult = (event) => {
+      let text = "";
+      for (let i = 0; i < event.results.length; i++) text += event.results[i][0].transcript;
+      setTranscript(text);
+      if (event.results[event.results.length - 1].isFinal) {
+        setParsed(parseVoiceIntent(text, data));
+        setListening(false);
+      }
+    };
+    recognition.onerror = () => { setError("Couldn't hear that clearly — try again."); setListening(false); };
+    recognition.onend = () => setListening(false);
+    recognition.start();
+    setListening(true);
+  };
+  const stopListening = () => { recognitionRef.current?.stop(); setListening(false); };
+
+  if (!SR) return <Empty text="Voice input isn't supported in this browser. Try Chrome on Android or desktop." />;
+
+  if (!parsed) {
+    return (
+      <div style={{ textAlign: "center", padding: "10px 0" }}>
+        <p style={{ color: "#8B93A3", fontSize: 13, marginBottom: 16 }}>
+          Try: "spent 200 on petrol from RAK card", "paid my RAK card bill 500", "lent Ravi 300", "Ravi paid me back 300"
+        </p>
+        <button style={{ ...s.quickAddBtn, background: listening ? "#B85C4A" : "#C6A15B" }} onClick={listening ? stopListening : startListening}>
+          {listening ? "Listening… tap to stop" : "🎤 Tap to speak"}
+        </button>
+        {transcript && <p style={{ marginTop: 14, fontSize: 13, color: "#EAEBEF" }}>"{transcript}"</p>}
+        {error && <p style={{ marginTop: 10, fontSize: 12, color: "#B85C4A" }}>{error}</p>}
+      </div>
+    );
+  }
+
+  const heard = <div style={{ fontSize: 12, color: "#7C8698", marginBottom: 10 }}>Heard: "{transcript}" — check these before saving:</div>;
+
+  if (parsed.type === "payCard") {
+    if (data.cards.length === 0) return <div>{heard}<Empty text="No cards found to pay." /></div>;
+    return <div>{heard}<QuickPayCardForm cards={data.cards} accounts={data.accounts} prefill={parsed} onSave={onSavePayCard} /></div>;
+  }
+  if (parsed.type === "lend" || parsed.type === "borrow") {
+    const kind = parsed.type === "lend" ? "owedMe" : "iOwe";
+    const peopleKey = kind === "owedMe" ? "peopleOwedMe" : "peopleIOwe";
+    return <div>{heard}<QuickPersonEntryForm people={data[peopleKey]} accounts={data.accounts} cards={kind === "owedMe" ? data.cards : []} kind={kind} prefill={parsed} onSave={onSavePersonEntry(kind)} /></div>;
+  }
+  if (parsed.type === "receive" || parsed.type === "payBack") {
+    const kind = parsed.type === "receive" ? "owedMe" : "iOwe";
+    const eligible = withOutstanding(kind);
+    if (eligible.length === 0) return <div>{heard}<Empty text="No one has an outstanding balance here right now." /></div>;
+    return <div>{heard}<QuickSettleForm people={eligible} accounts={data.accounts} kind={kind} prefill={parsed} onSave={onSaveSettle(kind)} /></div>;
+  }
+  // plain income/expense
+  return (
+    <div>
+      {heard}
+      <TxForm accounts={data.accounts} cards={data.cards} categories={data.categories} initialKind={parsed.kind} lockKind prefill={parsed} onSave={(kind, v) => onSaveTx(kind, { ...v, viaVoice: true })} />
+    </div>
+  );
+}
+
+function QuickPayCardForm({ cards, accounts, prefill, onSave }) {
+  const [cardId, setCardId] = useState(prefill?.cardId || cards[0]?.id || "");
+  const [amount, setAmount] = useState(prefill?.amount ? String(prefill.amount) : "");
   const [date, setDate] = useState(todayISO());
   const [accountId, setAccountId] = useState(accounts[0]?.id || "");
   if (accounts.length === 0) return <Empty text="Add a bank or cash account first, under Wallet." />;
@@ -694,14 +863,14 @@ function QuickPayCardForm({ cards, accounts, onSave }) {
   );
 }
 
-function QuickPersonEntryForm({ people, accounts, cards, kind, onSave }) {
-  const [personKey, setPersonKey] = useState(people[0] ? people[0].id : "__new__");
-  const [newName, setNewName] = useState("");
-  const [amount, setAmount] = useState("");
+function QuickPersonEntryForm({ people, accounts, cards, kind, prefill, onSave }) {
+  const [personKey, setPersonKey] = useState(prefill ? (prefill.personId || "__new__") : (people[0] ? people[0].id : "__new__"));
+  const [newName, setNewName] = useState(prefill?.newPersonName || "");
+  const [amount, setAmount] = useState(prefill?.amount ? String(prefill.amount) : "");
   const [date, setDate] = useState(todayISO());
-  const [details, setDetails] = useState("");
+  const [details, setDetails] = useState(prefill?.details || "");
   const options = [...accounts.map((a) => ({ key: `account:${a.id}`, label: `${a.name} (${fmt(a.balance)})` })), ...cards.map((c) => ({ key: `card:${c.id}`, label: `${c.name} (card)` }))];
-  const [sourceKey, setSourceKey] = useState("");
+  const [sourceKey, setSourceKey] = useState(prefill?.sourceKey || "");
   const verb = kind === "owedMe" ? "gave them" : "received from them";
   const isNew = personKey === "__new__";
   const valid = amount !== "" && date && (isNew ? newName.trim() : personKey);
@@ -733,13 +902,17 @@ function QuickPersonEntryForm({ people, accounts, cards, kind, onSave }) {
   );
 }
 
-function QuickSettleForm({ people, accounts, kind, onSave }) {
-  const [personId, setPersonId] = useState(people[0]?.id || "");
+function QuickSettleForm({ people, accounts, kind, prefill, onSave }) {
+  const [personId, setPersonId] = useState(prefill?.personId || people[0]?.id || "");
   const person = people.find((p) => p.id === personId);
-  const [amount, setAmount] = useState(String(person?.outstanding || 0));
+  const [amount, setAmount] = useState(prefill?.amount ? String(prefill.amount) : String(person?.outstanding || 0));
   const [accountId, setAccountId] = useState(accounts[0]?.id || "");
   const [date, setDate] = useState(todayISO());
-  useEffect(() => { setAmount(String(person?.outstanding || 0)); }, [personId]);
+  const skipFirstReset = useRef(true);
+  useEffect(() => {
+    if (skipFirstReset.current) { skipFirstReset.current = false; return; }
+    setAmount(String(person?.outstanding || 0));
+  }, [personId]);
   const numAmount = Number(amount);
   const outstanding = person?.outstanding || 0;
   const extra = numAmount - outstanding;
@@ -906,8 +1079,8 @@ function TransactionsTab({ data, patch }) {
           {filtered.map((e) => (
             <div key={e.kind + e.id} style={s.flowRow} onClick={() => setEditEntry({ entry: e, kind: e.kind })}>
               <div style={{ flex: 1 }}>
-                <div style={s.cardName}>{e.category}{e.recurringId ? " ↻" : ""}</div>
-                <div style={s.cardSub}>{fmtDate(e.date)} · {e.kind === "income" ? accountName(e.accountId) : e.source.type === "card" ? cardName(e.source.id) + " (card)" : accountName(e.source.id)}{e.note ? ` · ${e.note}` : ""}</div>
+                <div style={s.cardName}>{e.category}{e.recurringId ? " ↻" : ""}{e.viaVoice ? " 🎤" : ""}</div>
+                <div style={s.cardSub}>{fmtDate(e.date)} · {e.kind === "income" ? accountName(e.accountId) : e.source.type === "card" ? cardName(e.source.id) + " (card)" : accountName(e.source.id)}{e.subcategory ? ` · ${e.subcategory}` : ""}{e.note ? ` · ${e.note}` : ""}</div>
               </div>
               <div style={{ ...s.mono, color: e.kind === "income" ? "#4C9A82" : "#B85C4A" }}>{e.kind === "income" ? "+" : "-"}{fmt(e.amount)}</div>
               <button style={s.iconDeleteBtn} onClick={(ev) => { ev.stopPropagation(); removeTx(e); }}><Trash2 size={13} /></button>
@@ -1046,20 +1219,22 @@ function CategoryManager({ categories, patch }) {
   );
 }
 
-function TxForm({ accounts, cards, categories, initial, initialKind, recurringMode, lockKind, onManageCategories, onSave }) {
+function TxForm({ accounts, cards, categories, initial, initialKind, recurringMode, lockKind, onManageCategories, prefill, onSave }) {
   const [kind, setKind] = useState(initialKind || "expense");
-  const [amount, setAmount] = useState(initial ? String(initial.amount) : "");
+  const [amount, setAmount] = useState(initial ? String(initial.amount) : (prefill?.amount || prefill?.amount === 0) ? String(prefill.amount) : "");
   const [date, setDate] = useState(initial ? initial.date : todayISO());
   const cats = kind === "income" ? categories.income : categories.expense;
-  const [category, setCategory] = useState(initial ? initial.category : cats[0]?.name || "");
-  const [subcategory, setSubcategory] = useState(initial?.subcategory || "");
-  const [note, setNote] = useState(initial ? initial.note || "" : "");
+  const [category, setCategory] = useState(initial ? initial.category : prefill?.category || cats[0]?.name || "");
+  const [subcategory, setSubcategory] = useState(initial?.subcategory || prefill?.subcategory || "");
+  const [note, setNote] = useState(initial ? initial.note || "" : prefill?.note || "");
   const expenseOptions = [...accounts.map((a) => ({ key: `account:${a.id}`, label: `${a.name} (${fmt(a.balance)})` })), ...cards.map((c) => ({ key: `card:${c.id}`, label: `${c.name} (card)` }))];
-  const initialSourceKey = initial && initialKind === "expense" ? `${initial.source.type}:${initial.source.id}` : expenseOptions[0]?.key || "";
+  const initialSourceKey = initial && initialKind === "expense" ? `${initial.source.type}:${initial.source.id}` : (prefill?.sourceKey || expenseOptions[0]?.key || "");
   const [sourceKey, setSourceKey] = useState(initialSourceKey);
-  const [accountId, setAccountId] = useState(initial && initialKind === "income" ? initial.accountId : accounts[0]?.id || "");
+  const [accountId, setAccountId] = useState(initial && initialKind === "income" ? initial.accountId : (prefill?.accountId || accounts[0]?.id || ""));
 
+  const skipFirstCatReset = useRef(true);
   useEffect(() => {
+    if (skipFirstCatReset.current) { skipFirstCatReset.current = false; return; }
     if (!initial) { const c = (kind === "income" ? categories.income : categories.expense)[0]; setCategory(c?.name || ""); setSubcategory(""); }
   }, [kind]);
 
@@ -1133,6 +1308,17 @@ function WalletTab({ data, patch }) {
         <button style={{ ...s.toggleBtn, ...(section === "accounts" ? s.toggleActiveIncome : {}) }} onClick={() => setSection("accounts")}>Bank & cash</button>
       </div>
       {section === "cards" ? <CardsTab data={data} patch={patch} /> : <AccountsTab data={data} patch={patch} />}
+    </div>
+  );
+}
+
+function UtilBar({ used, limit }) {
+  if (!limit) return null;
+  const pct = Math.min(100, Math.max(0, (used / limit) * 100));
+  const color = pct >= 90 ? "#B85C4A" : pct >= 70 ? "#C6A15B" : "#4C9A82";
+  return (
+    <div style={{ marginTop: 6, height: 5, background: "#20262F", borderRadius: 4, overflow: "hidden" }}>
+      <div style={{ width: `${pct}%`, height: "100%", background: color, borderRadius: 4 }} />
     </div>
   );
 }
@@ -1222,6 +1408,7 @@ function CardsTab({ data, patch }) {
               <div style={{ flex: 1 }}>
                 <div style={s.cardName}>{c.name}</div>
                 <div style={s.cardSub}>Limit {fmt(c.limit)} · Available {fmt(available)}</div>
+                <UtilBar used={Number(c.due || 0)} limit={Number(c.limit || 0)} />
               </div>
               <div style={{ textAlign: "right" }}>
                 <div style={s.mono}>{fmt(c.due)}</div>
@@ -1843,6 +2030,23 @@ function ReportsTab({ data, setData }) {
   const fileInputRef = useRef(null);
 
   const exportData = () => downloadBackupFile(data);
+  const exportCSV = () => {
+    const accountName = (id) => data.accounts.find((a) => a.id === id)?.name || "";
+    const cardName = (id) => data.cards.find((c) => c.id === id)?.name || "";
+    const header = ["Date", "Type", "Category", "Subcategory", "Amount (AED)", "Paid with / Deposited into", "Note"];
+    const dataRows = [
+      ...data.expenses.map((e) => [e.date, "Expense", e.category, e.subcategory || "", e.amount, e.source.type === "card" ? cardName(e.source.id) + " (card)" : accountName(e.source.id), e.note || ""]),
+      ...data.income.map((e) => [e.date, "Income", e.category, e.subcategory || "", e.amount, accountName(e.accountId), e.note || ""]),
+    ].sort((a, b) => new Date(a[0]) - new Date(b[0]));
+    const esc = (v) => `"${String(v).replace(/"/g, '""')}"`;
+    const csv = [header, ...dataRows].map((r) => r.map(esc).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `money-board-transactions-${todayISO()}.csv`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
   const importData = (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -1873,6 +2077,7 @@ function ReportsTab({ data, setData }) {
     <div className="no-print" style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
       <button style={s.smallSolidBtn} onClick={() => window.print()}>Save as PDF</button>
       <button style={{ ...s.smallSolidBtn, background: "#242B38", color: "#EAEBEF" }} onClick={exportData}>Export backup</button>
+      <button style={{ ...s.smallSolidBtn, background: "#242B38", color: "#EAEBEF" }} onClick={exportCSV}>Export CSV</button>
       <button style={{ ...s.smallSolidBtn, background: "#242B38", color: "#EAEBEF" }} onClick={() => fileInputRef.current.click()}>Import backup</button>
       <input ref={fileInputRef} type="file" accept="application/json" style={{ display: "none" }} onChange={importData} />
     </div>
@@ -1902,8 +2107,8 @@ function ReportsTab({ data, setData }) {
           <div style={s.netLabel}>Net this month</div>
           <div style={{ ...s.netValue, color: income - expense >= 0 ? "#4C9A82" : "#B85C4A" }}>{fmt(income - expense)}</div>
         </div>
-        <CategoryBlock title="Income by category" tone="#4C9A82" cats={byCategory(inc)} />
-        <CategoryBlock title="Expense by category" tone="#B85C4A" cats={byCategory(exp)} />
+        <CategoryBlock title="Income by category" tone="#4C9A82" cats={byCategory(inc)} entries={inc} />
+        <CategoryBlock title="Expense by category" tone="#B85C4A" cats={byCategory(exp)} entries={exp} />
         <CardSpendBlock cards={data.cards} expenses={exp} />
       </div>
     );
@@ -1936,8 +2141,8 @@ function ReportsTab({ data, setData }) {
         <div style={{ ...s.netValue, color: income - expense >= 0 ? "#4C9A82" : "#B85C4A" }}>{fmt(income - expense)}</div>
       </div>
       <SimpleYearChart monthly={monthly} />
-      <CategoryBlock title="Income by category" tone="#4C9A82" cats={byCategory(inc)} />
-      <CategoryBlock title="Expense by category" tone="#B85C4A" cats={byCategory(exp)} />
+      <CategoryBlock title="Income by category" tone="#4C9A82" cats={byCategory(inc)} entries={inc} />
+      <CategoryBlock title="Expense by category" tone="#B85C4A" cats={byCategory(exp)} entries={exp} />
       <CardSpendBlock cards={data.cards} expenses={exp} />
     </div>
   );
@@ -1950,20 +2155,46 @@ function ModeToggle({ mode, setMode }) {
     </div>
   );
 }
-function CategoryBlock({ title, tone, cats }) {
+function CategoryBlock({ title, tone, cats, entries }) {
+  const [openCat, setOpenCat] = useState(null);
   if (cats.length === 0) return null;
   const total = cats.reduce((s2, [, v]) => s2 + v, 0);
+
+  const subBreakdown = (catName) => {
+    if (!entries) return [];
+    const map = {};
+    entries.filter((e) => e.category === catName).forEach((e) => {
+      const key = e.subcategory || "(no subcategory)";
+      map[key] = (map[key] || 0) + Number(e.amount || 0);
+    });
+    const list = Object.entries(map).sort((a, b) => b[1] - a[1]);
+    return list.length > 1 || (list.length === 1 && list[0][0] !== "(no subcategory)") ? list : [];
+  };
+
   return (
     <div style={{ marginTop: 16 }}>
       <div style={s.sectionTitle}>{title}</div>
       <div style={{ marginTop: 8 }}>
-        {cats.map(([cat, amt]) => (
-          <div key={cat} style={s.catRow}>
-            <span>{cat}</span>
-            <div style={s.catBarTrack}><div style={{ ...s.catBarFill, width: `${total ? (amt / total) * 100 : 0}%`, background: tone }} /></div>
-            <span style={{ ...s.mono, color: tone }}>{fmt(amt)}</span>
-          </div>
-        ))}
+        {cats.map(([cat, amt]) => {
+          const subs = subBreakdown(cat);
+          const isOpen = openCat === cat;
+          return (
+            <div key={cat}>
+              <div style={{ ...s.catRow, cursor: subs.length ? "pointer" : "default" }} onClick={() => subs.length && setOpenCat(isOpen ? null : cat)}>
+                <span>{cat}{subs.length > 0 ? (isOpen ? " ▾" : " ▸") : ""}</span>
+                <div style={s.catBarTrack}><div style={{ ...s.catBarFill, width: `${total ? (amt / total) * 100 : 0}%`, background: tone }} /></div>
+                <span style={{ ...s.mono, color: tone }}>{fmt(amt)}</span>
+              </div>
+              {isOpen && subs.map(([sub, subAmt]) => (
+                <div key={sub} style={{ ...s.catRow, paddingLeft: 16, fontSize: 11.5, opacity: 0.8 }}>
+                  <span>{sub}</span>
+                  <div style={s.catBarTrack}><div style={{ ...s.catBarFill, width: `${amt ? (subAmt / amt) * 100 : 0}%`, background: tone }} /></div>
+                  <span style={{ ...s.mono, color: tone }}>{fmt(subAmt)}</span>
+                </div>
+              ))}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
