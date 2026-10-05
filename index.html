@@ -54,7 +54,8 @@
   const PREVIEW_MODE = !FIREBASE_LOADED || !CONFIG_SET;
 
   let auth, db;
-  const PIN_EMAIL = "owner@money-board.local"; // fixed account behind the PIN — don't change after first setup
+  const SHARED_EMAIL = "owner@money-board.local";
+  const SHARED_PASSWORD = "money-board-auto-login-2026"; // no real secrecy — this app has no login screen, anyone with the link can open it
   if (FIREBASE_LOADED) {
     firebase.initializeApp(firebaseConfig);
     auth = firebase.auth();
@@ -66,32 +67,37 @@
     if (PREVIEW_MODE) { cb({ uid: "preview-user", displayName: "Preview" }); return () => {}; }
     return authObj.onAuthStateChanged(cb);
   }
-  // Tries to sign in with this PIN; if that fails, tries to create the account
-  // with this PIN (this is how the very first PIN gets set). If creation fails
-  // because the account already exists, the PIN was just wrong.
-  // Safety net: if this device has successfully signed in before, a failed
-  // sign-in should NOT silently create a brand-new blank account — that's
-  // almost always a mistyped PIN, not someone starting fresh.
-  async function signInWithPin(authObj, pin, confirmed) {
+  // Signs in automatically, no prompt. First ever call creates the account;
+  // every call after just signs in. If this account still has an OLD PIN as
+  // its real password (from before auto-login existed), sign-in fails and
+  // create-fails-too (email already in use) — that's the one-time migration case.
+  async function autoSignIn(authObj) {
     if (PREVIEW_MODE) return { ok: true };
     try {
-      await authObj.signInWithEmailAndPassword(PIN_EMAIL, pin);
-      localStorage.setItem("moneyboard_pin_set", "1");
+      await authObj.signInWithEmailAndPassword(SHARED_EMAIL, SHARED_PASSWORD);
       return { ok: true };
     } catch (signInErr) {
-      const usedBefore = localStorage.getItem("moneyboard_pin_set") === "1";
-      if (usedBefore && !confirmed) {
-        return { ok: false, needsConfirm: true, error: "That doesn't match the PIN this device used before. Double-check it — or confirm to start a brand-new, empty account instead." };
-      }
       try {
-        await authObj.createUserWithEmailAndPassword(PIN_EMAIL, pin);
-        localStorage.setItem("moneyboard_pin_set", "1");
+        await authObj.createUserWithEmailAndPassword(SHARED_EMAIL, SHARED_PASSWORD);
         return { ok: true, created: true };
       } catch (createErr) {
-        if (createErr.code === "auth/email-already-in-use") return { ok: false, error: "Wrong PIN." };
-        if (createErr.code === "auth/weak-password") return { ok: false, error: "PIN must be at least 6 digits." };
+        if (createErr.code === "auth/email-already-in-use") return { ok: false, needsMigration: true };
         return { ok: false, error: createErr.message };
       }
+    }
+  }
+  // One-time migration: sign in with the old PIN, then permanently switch
+  // the account's password to the fixed shared one so no PIN is ever needed again.
+  async function migrateFromPin(authObj, oldPin) {
+    try {
+      const cred = await authObj.signInWithEmailAndPassword(SHARED_EMAIL, oldPin);
+      await cred.user.updatePassword(SHARED_PASSWORD);
+      return { ok: true };
+    } catch (err) {
+      if (err.code === "auth/wrong-password" || err.code === "auth/invalid-credential" || err.code === "auth/invalid-login-credentials") {
+        return { ok: false, error: "That doesn't match the old PIN. Try again." };
+      }
+      return { ok: false, error: err.message };
     }
   }
   function signOut(authObj) {
@@ -175,7 +181,7 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const monthKey = (iso) => iso.slice(0, 7); // "2026-07"
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const APP_VERSION = "2026-09-23.4"; // bumped every time Claude gives you a new file — check this matches what's live
+const APP_VERSION = "2026-09-23.6"; // bumped every time Claude gives you a new file — check this matches what's live
 const DEFAULT_INCOME_CATS = [
   { name: "Salary", subs: [] }, { name: "Freelance", subs: [] }, { name: "Business", subs: [] }, { name: "Other", subs: [] },
 ];
@@ -211,6 +217,7 @@ function stripUndefined(value) {
 function useStorage(uidStr) {
   const [data, setData] = useState(emptyState);
   const [loaded, setLoaded] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const saveTimer = useRef(null);
   const docRef = FIREBASE_LOADED && !PREVIEW_MODE ? doc(db, "users", uidStr, "data", "moneyboard") : null;
 
@@ -220,24 +227,53 @@ function useStorage(uidStr) {
         if (docRef) {
           const snap = await getDoc(docRef);
           if (snap.exists()) setData({ ...emptyState, ...snap.data() });
+          setLoaded(true);
+        } else {
+          setLoaded(true); // preview mode / no Firebase — nothing to load, safe to proceed
         }
-      } catch (e) { console.error("Load failed", e); }
-      setLoaded(true);
+      } catch (e) {
+        console.error("Load failed", e);
+        // CRITICAL: do NOT set loaded=true here. If the real data failed to
+        // load (e.g. a network blip), treating this as "loaded with empty
+        // data" would let the save effect below overwrite real data with
+        // nothing. Better to block saving entirely and show a retry screen.
+        setLoadFailed(true);
+      }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uidStr]);
 
   useEffect(() => {
-    if (!loaded) return;
+    if (!loaded || loadFailed) return;
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
       if (docRef) setDoc(docRef, stripUndefined(data)).catch((e) => console.error("Save failed", e));
     }, 500);
     return () => clearTimeout(saveTimer.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, loaded]);
+  }, [data, loaded, loadFailed]);
 
-  return [data, setData, loaded];
+  // If the tab is closed or backgrounded while a save is still pending (within
+  // the 500ms debounce), flush it immediately instead of losing that change.
+  useEffect(() => {
+    if (!loaded || loadFailed || !docRef) return;
+    const flush = () => {
+      if (saveTimer.current) {
+        clearTimeout(saveTimer.current);
+        setDoc(docRef, stripUndefined(data)).catch((e) => console.error("Flush save failed", e));
+      }
+    };
+    const onVisibility = () => { if (document.visibilityState === "hidden") flush(); };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, loaded, loadFailed]);
+
+  return [data, setData, loaded, loadFailed];
 }
 
 const bumpAccount = (accounts, id, delta) => accounts.map((a) => (a.id === id ? { ...a, balance: Number(a.balance || 0) + delta } : a));
@@ -318,10 +354,24 @@ function MigrationScreen({ onDone }) {
 }
 
 function MoneyBoard({ user }) {
-  const [data, setData, loaded] = useStorage(user.uid);
+  const [data, setData, loaded, loadFailed] = useStorage(user.uid);
   const [tab, setTab] = useState("dashboard");
   const tabRowRef = useRef(null);
   const patch = (updater) => setData((d) => ({ ...d, ...(typeof updater === "function" ? updater(d) : updater) }));
+
+  if (loadFailed) {
+    return (
+      <div style={s.page}>
+        <div style={{ ...s.wrap, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "80vh", gap: 16, textAlign: "center" }}>
+          <h1 style={s.h1}>Money Board</h1>
+          <p style={{ color: "#B85C4A", fontSize: 14, maxWidth: 300 }}>
+            Couldn't load your data — likely a connection issue. To protect what's already saved, nothing will load or save until this succeeds.
+          </p>
+          <button style={s.submitBtn} onClick={() => window.location.reload()}>Try again</button>
+        </div>
+      </div>
+    );
+  }
 
   useEffect(() => {
     const row = tabRowRef.current;
