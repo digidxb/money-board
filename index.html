@@ -119,6 +119,27 @@
     if (PREVIEW_MODE) { previewData = data; return; }
     return ref.set(data);
   }
+
+  // ---- Daily snapshots: users/{uid}/backups/{YYYY-MM-DD}, newest 14 kept ----
+  function backupsCol(uid) { return db.collection("users").doc(uid).collection("backups"); }
+  async function saveDailySnapshot(uid, dataObj, today) {
+    if (PREVIEW_MODE) return;
+    try {
+      const col = backupsCol(uid);
+      const ref = col.doc(today);
+      const existing = await ref.get();
+      if (!existing.exists) {
+        await ref.set({ date: today, savedAt: new Date().toISOString(), json: JSON.stringify(dataObj) });
+      }
+      const all = await col.get();
+      const stale = all.docs.map((d) => d.id).sort().reverse().slice(14);
+      await Promise.all(stale.map((id) => col.doc(id).delete()));
+    } catch (e) { console.error("Snapshot failed", e); }
+  }
+  async function listSnapshots(uid) {
+    const all = await backupsCol(uid).get();
+    return all.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => b.id.localeCompare(a.id));
+  }
 </script>
 
 <script type="text/babel" data-presets="react">
@@ -181,7 +202,7 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const monthKey = (iso) => iso.slice(0, 7); // "2026-07"
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const APP_VERSION = "2026-09-23.6"; // bumped every time Claude gives you a new file — check this matches what's live
+const APP_VERSION = "2026-09-23.7"; // bumped every time Claude gives you a new file — check this matches what's live
 const DEFAULT_INCOME_CATS = [
   { name: "Salary", subs: [] }, { name: "Freelance", subs: [] }, { name: "Business", subs: [] }, { name: "Other", subs: [] },
 ];
@@ -214,19 +235,47 @@ function stripUndefined(value) {
   return value;
 }
 
+// How many real records exist (ignores default categories / net worth history).
+function countRecords(d) {
+  return ["accounts", "cards", "cardPayments", "peopleOwedMe", "entriesOwedMe", "peopleIOwe", "entriesIOwe", "expenses", "income", "recurring"]
+    .reduce((n, k) => n + (Array.isArray(d && d[k]) ? d[k].length : 0), 0);
+}
+
 function useStorage(uidStr) {
   const [data, setData] = useState(emptyState);
   const [loaded, setLoaded] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
+  const [saveBlocked, setSaveBlocked] = useState(false);
   const saveTimer = useRef(null);
+  const prevCountRef = useRef(0);        // how many records existed at the last good load/save
+  const allowEmptyRef = useRef(false);   // set when the person explicitly says "save anyway"
   const docRef = FIREBASE_LOADED && !PREVIEW_MODE ? doc(db, "users", uidStr, "data", "moneyboard") : null;
+
+  // Empty-data guard: if we had real records and the data suddenly has none,
+  // that's almost certainly a bug or a bad import — don't overwrite the saved copy.
+  const canSave = (d) => allowEmptyRef.current || !(countRecords(d) === 0 && prevCountRef.current >= 3);
+
+  const doSave = (d, label) => {
+    if (!docRef) return;
+    if (!canSave(d)) { setSaveBlocked(true); return; }
+    setSaveBlocked(false);
+    setDoc(docRef, stripUndefined(d))
+      .then(() => { prevCountRef.current = countRecords(d); allowEmptyRef.current = false; })
+      .catch((e) => console.error(label + " failed", e));
+  };
 
   useEffect(() => {
     (async () => {
       try {
         if (docRef) {
           const snap = await getDoc(docRef);
-          if (snap.exists()) setData({ ...emptyState, ...snap.data() });
+          if (snap.exists()) {
+            const loadedData = { ...emptyState, ...snap.data() };
+            setData(loadedData);
+            prevCountRef.current = countRecords(loadedData);
+            // Daily snapshot of what was saved when you opened the app (skipped if empty)
+            if (countRecords(loadedData) > 0) saveDailySnapshot(uidStr, loadedData, todayISO());
+          }
           setLoaded(true);
         } else {
           setLoaded(true); // preview mode / no Firebase — nothing to load, safe to proceed
@@ -247,7 +296,8 @@ function useStorage(uidStr) {
     if (!loaded || loadFailed) return;
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      if (docRef) setDoc(docRef, stripUndefined(data)).catch((e) => console.error("Save failed", e));
+      saveTimer.current = null;
+      doSave(data, "Save");
     }, 500);
     return () => clearTimeout(saveTimer.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -260,7 +310,8 @@ function useStorage(uidStr) {
     const flush = () => {
       if (saveTimer.current) {
         clearTimeout(saveTimer.current);
-        setDoc(docRef, stripUndefined(data)).catch((e) => console.error("Flush save failed", e));
+        saveTimer.current = null;
+        doSave(data, "Flush save");
       }
     };
     const onVisibility = () => { if (document.visibilityState === "hidden") flush(); };
@@ -273,7 +324,9 @@ function useStorage(uidStr) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, loaded, loadFailed]);
 
-  return [data, setData, loaded, loadFailed];
+  const forceSave = () => { allowEmptyRef.current = true; setSaveBlocked(false); setData((d) => ({ ...d })); };
+
+  return [data, setData, loaded, loadFailed, { blocked: saveBlocked, forceSave }];
 }
 
 const bumpAccount = (accounts, id, delta) => accounts.map((a) => (a.id === id ? { ...a, balance: Number(a.balance || 0) + delta } : a));
@@ -354,24 +407,11 @@ function MigrationScreen({ onDone }) {
 }
 
 function MoneyBoard({ user }) {
-  const [data, setData, loaded, loadFailed] = useStorage(user.uid);
+  const [data, setData, loaded, loadFailed, guard] = useStorage(user.uid);
   const [tab, setTab] = useState("dashboard");
   const tabRowRef = useRef(null);
   const patch = (updater) => setData((d) => ({ ...d, ...(typeof updater === "function" ? updater(d) : updater) }));
 
-  if (loadFailed) {
-    return (
-      <div style={s.page}>
-        <div style={{ ...s.wrap, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "80vh", gap: 16, textAlign: "center" }}>
-          <h1 style={s.h1}>Money Board</h1>
-          <p style={{ color: "#B85C4A", fontSize: 14, maxWidth: 300 }}>
-            Couldn't load your data — likely a connection issue. To protect what's already saved, nothing will load or save until this succeeds.
-          </p>
-          <button style={s.submitBtn} onClick={() => window.location.reload()}>Try again</button>
-        </div>
-      </div>
-    );
-  }
 
   useEffect(() => {
     const row = tabRowRef.current;
@@ -421,6 +461,20 @@ function MoneyBoard({ user }) {
     { id: "reports", label: "Reports", icon: BarChart3 },
   ];
 
+  if (loadFailed) {
+    return (
+      <div style={s.page}>
+        <div style={{ ...s.wrap, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "80vh", gap: 16, textAlign: "center" }}>
+          <h1 style={s.h1}>Money Board</h1>
+          <p style={{ color: "#B85C4A", fontSize: 14, maxWidth: 300 }}>
+            Couldn't load your data — likely a connection issue. To protect what's already saved, nothing will load or save until this succeeds.
+          </p>
+          <button style={s.submitBtn} onClick={() => window.location.reload()}>Try again</button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={s.page} id="app-page">
       <div style={s.wrap}>
@@ -430,6 +484,12 @@ function MoneyBoard({ user }) {
         {PREVIEW_MODE && (
           <div className="no-print" style={{ background: "#3A241F", border: "1px solid #B85C4A", color: "#E8B4A8", fontSize: 12, borderRadius: 8, padding: "9px 12px", marginBottom: 14 }}>
             Preview mode — nothing is saved yet. {typeof firebase === "undefined" ? "Firebase scripts didn't load (check your internet/network)." : "Add your Firebase keys at the top of this file, then re-upload, to save your data for real."}
+          </div>
+        )}
+        {guard.blocked && (
+          <div className="no-print" style={{ background: "#3A241F", border: "1px solid #B85C4A", color: "#F0C4B8", fontSize: 12.5, borderRadius: 8, padding: "10px 12px", marginBottom: 14 }}>
+            <strong>Saving is paused.</strong> Your data suddenly looks completely empty, so the app is NOT overwriting your last saved copy. Go to Reports → Restore snapshot to roll back, or tap below if you really meant to empty everything.
+            <div style={{ marginTop: 8 }}><button style={s.smallSolidBtn} onClick={guard.forceSave}>Save empty data anyway</button></div>
           </div>
         )}
         {justBackedUp && (
@@ -461,7 +521,7 @@ function MoneyBoard({ user }) {
             {tab === "transactions" && <TransactionsTab data={data} patch={patch} />}
             {tab === "wallet" && <WalletTab data={data} patch={patch} />}
             {tab === "people" && <PeopleSection data={data} patch={patch} />}
-            {tab === "reports" && <ReportsTab data={data} setData={setData} />}
+            {tab === "reports" && <ReportsTab data={data} setData={setData} uid={user.uid} />}
           </>
         )}
         <div className="no-print" style={{ textAlign: "center", fontSize: 10.5, color: "#3A4150", marginTop: 24 }}>Money Board {APP_VERSION}</div>
@@ -2072,7 +2132,52 @@ function CurrentStatusSnapshot({ data }) {
   );
 }
 
-function ReportsTab({ data, setData }) {
+function summarizeSnapshot(json) {
+  try {
+    const d = JSON.parse(json);
+    const bank = (d.accounts || []).reduce((s2, a) => s2 + Number(a.balance || 0), 0);
+    return {
+      parsed: d,
+      text: `${(d.accounts || []).length} accounts, ${(d.cards || []).length} cards, ${countRecords(d)} records · Cash+bank ${fmt(bank)}`,
+    };
+  } catch (e) { return null; }
+}
+
+function SnapshotRestore({ uid, onRestore }) {
+  const [list, setList] = useState(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    if (PREVIEW_MODE) { setError("Snapshots aren't available in preview mode."); return; }
+    listSnapshots(uid).then(setList).catch(() => setError("Couldn't load snapshots. Check your connection and try again."));
+  }, []);
+  if (error) return <Empty text={error} />;
+  if (!list) return <Empty text="Loading snapshots…" />;
+  if (list.length === 0) return <Empty text="No snapshots yet. One is saved automatically the first time you open the app each day (once there's data)." />;
+  return (
+    <div>
+      <div style={{ fontSize: 11.5, color: "#7C8698", marginBottom: 10 }}>
+        Restoring replaces everything currently in the app with that day's saved copy. Each snapshot is how your data looked when you first opened the app that day.
+      </div>
+      {list.map((snap) => {
+        const sum = summarizeSnapshot(snap.json);
+        return (
+          <div key={snap.id} style={{ ...s.flowRow, cursor: "default" }}>
+            <div style={{ flex: 1 }}>
+              <div style={s.cardName}>{fmtDate(snap.id)}</div>
+              <div style={s.cardSub}>{sum ? sum.text : "Couldn't read this snapshot"}</div>
+            </div>
+            {sum && (
+              <button style={s.payBtn} onClick={() => { if (confirm(`Replace everything with the snapshot from ${fmtDate(snap.id)}? Anything added since then will be lost.`)) onRestore(sum.parsed); }}>Restore</button>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ReportsTab({ data, setData, uid }) {
+  const [showSnapshots, setShowSnapshots] = useState(false);
   const [mode, setMode] = useState("monthly");
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
@@ -2129,7 +2234,13 @@ function ReportsTab({ data, setData }) {
       <button style={{ ...s.smallSolidBtn, background: "#242B38", color: "#EAEBEF" }} onClick={exportData}>Export backup</button>
       <button style={{ ...s.smallSolidBtn, background: "#242B38", color: "#EAEBEF" }} onClick={exportCSV}>Export CSV</button>
       <button style={{ ...s.smallSolidBtn, background: "#242B38", color: "#EAEBEF" }} onClick={() => fileInputRef.current.click()}>Import backup</button>
+      <button style={{ ...s.smallSolidBtn, background: "#242B38", color: "#EAEBEF" }} onClick={() => setShowSnapshots(true)}>Restore snapshot</button>
       <input ref={fileInputRef} type="file" accept="application/json" style={{ display: "none" }} onChange={importData} />
+      {showSnapshots && (
+        <Modal title="Restore from a daily snapshot" onClose={() => setShowSnapshots(false)}>
+          <SnapshotRestore uid={uid} onRestore={(restored) => { setData({ ...emptyState, ...restored }); setShowSnapshots(false); }} />
+        </Modal>
+      )}
     </div>
   );
   const printHeading = <h2 style={{ ...s.sectionTitle, marginBottom: 12 }}>Money Board — Report</h2>;
