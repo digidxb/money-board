@@ -160,6 +160,7 @@ const Wallet = () => "👛";
 const Landmark = () => "🏦";
 const Check = () => "✓";
 const BarChart3 = () => "📊";
+const LogIcon = () => "📝";
 const TrendingUp = () => "📈";
 const TrendingDown = () => "📉";
 const LogOut = () => "⎋";
@@ -202,7 +203,7 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const monthKey = (iso) => iso.slice(0, 7); // "2026-07"
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const APP_VERSION = "2026-09-23.7"; // bumped every time Claude gives you a new file — check this matches what's live
+const APP_VERSION = "2026-11-03.9"; // bumped every time Claude gives you a new file — check this matches what's live
 const DEFAULT_INCOME_CATS = [
   { name: "Salary", subs: [] }, { name: "Freelance", subs: [] }, { name: "Business", subs: [] }, { name: "Other", subs: [] },
 ];
@@ -212,7 +213,8 @@ const DEFAULT_EXPENSE_CATS = [
 ];
 
 const emptyState = {
-  accounts: [], cards: [], cardPayments: [],
+  accounts: [], cards: [], cardPayments: [], payments: [], log: [], // log: activity history of every add / edit / delete
+  // payments: one record per lump-sum person payment
   peopleOwedMe: [], entriesOwedMe: [], peopleIOwe: [], entriesIOwe: [],
   expenses: [], income: [], recurring: [], // {id, kind:'income'|'expense', amount, category, subcategory, note, source|accountId}
   netWorthHistory: [], // {date, value} — one snapshot recorded per day you use the app
@@ -237,7 +239,7 @@ function stripUndefined(value) {
 
 // How many real records exist (ignores default categories / net worth history).
 function countRecords(d) {
-  return ["accounts", "cards", "cardPayments", "peopleOwedMe", "entriesOwedMe", "peopleIOwe", "entriesIOwe", "expenses", "income", "recurring"]
+  return ["accounts", "cards", "cardPayments", "payments", "peopleOwedMe", "entriesOwedMe", "peopleIOwe", "entriesIOwe", "expenses", "income", "recurring"]
     .reduce((n, k) => n + (Array.isArray(d && d[k]) ? d[k].length : 0), 0);
 }
 
@@ -329,6 +331,126 @@ function useStorage(uidStr) {
   return [data, setData, loaded, loadFailed, { blocked: saveBlocked, forceSave }];
 }
 
+// ---- Activity log: compares data before/after every change and records what was added / edited / removed ----
+const LOG_COLLECTIONS = [
+  { key: "expenses", area: "Expense", text: (r) => `${r.category || ""}${r.subcategory ? " › " + r.subcategory : ""}${r.note ? " · " + r.note : ""}`, amt: (r) => r.amount },
+  { key: "income", area: "Income", text: (r) => `${r.category || ""}${r.subcategory ? " › " + r.subcategory : ""}${r.note ? " · " + r.note : ""}`, amt: (r) => r.amount },
+  { key: "cardPayments", area: "Card payment", text: (r, d) => `${(d.cards.find((c) => c.id === r.cardId) || {}).name || "Card"}`, amt: (r) => r.amount },
+  { key: "payments", area: "Person payment", text: (r) => `${r.kind === "owedMe" ? "Received from" : "Paid to"} ${r.personName || "someone"}`, amt: (r) => r.amount, noChange: true },
+  { key: "accounts", area: "Account", text: (r) => r.name, amt: (r) => r.balance, ignore: ["balance"] },
+  { key: "cards", area: "Card", text: (r) => r.name, amt: (r) => r.due, ignore: ["due", "dueAmount", "available"] },
+  { key: "peopleOwedMe", area: "Person (owes me)", text: (r) => r.name },
+  { key: "peopleIOwe", area: "Person (I owe)", text: (r) => r.name },
+  { key: "entriesOwedMe", area: "Owed to me", text: (r, d) => `${((d.peopleOwedMe.find((p) => p.id === r.personId)) || {}).name || "someone"}${r.details ? " · " + r.details : ""}`, amt: (r) => r.amount },
+  { key: "entriesIOwe", area: "I owe", text: (r, d) => `${((d.peopleIOwe.find((p) => p.id === r.personId)) || {}).name || "someone"}${r.details ? " · " + r.details : ""}`, amt: (r) => r.amount },
+  { key: "recurring", area: "Recurring", text: (r) => `${r.category || ""}${r.note ? " · " + r.note : ""}`, amt: (r) => r.amount },
+];
+function buildLogEntries(oldD, newD) {
+  const out = []; const ts = new Date().toISOString();
+  const push = (action, c, r, d, extra) => out.push({ id: uid(), ts, action, area: c.area, text: String(c.text(r, d) || "").trim(), amount: c.amt ? Number(c.amt(r)) || 0 : null, extra: extra || "" });
+  const strip = (r, ignore) => { const o = { ...r }; (ignore || []).forEach((k) => delete o[k]); return JSON.stringify(stripUndefined(o)); };
+  const diffs = {};
+  LOG_COLLECTIONS.forEach((c) => {
+    const a = oldD[c.key] || [], b = newD[c.key] || [];
+    if (a === b) return;
+    const am = new Map(a.map((r) => [r.id, r])), bm = new Map(b.map((r) => [r.id, r]));
+    diffs[c.key] = {
+      added: b.filter((r) => !am.has(r.id)),
+      removed: a.filter((r) => !bm.has(r.id)),
+      changed: c.noChange ? [] : b.filter((r) => am.has(r.id) && strip(am.get(r.id), c.ignore) !== strip(r, c.ignore)).map((r) => [am.get(r.id), r]),
+    };
+  });
+  const payChanged = diffs.payments && (diffs.payments.added.length || diffs.payments.removed.length);
+  const removedPeople = new Set([...(diffs.peopleOwedMe ? diffs.peopleOwedMe.removed : []), ...(diffs.peopleIOwe ? diffs.peopleIOwe.removed : [])].map((p) => p.id));
+  const removedCards = new Set((diffs.cards ? diffs.cards.removed : []).map((c) => c.id));
+  LOG_COLLECTIONS.forEach((c) => {
+    const df = diffs[c.key]; if (!df) return;
+    const isEntry = c.key === "entriesOwedMe" || c.key === "entriesIOwe";
+    if (isEntry && payChanged) return; // entries touched by a payment are side effects of that payment's own log line
+    df.added.forEach((r) => push("added", c, r, newD, r.date ? "" : ""));
+    df.removed.forEach((r) => {
+      if (isEntry && removedPeople.has(r.personId)) return;
+      if (c.key === "cardPayments" && removedCards.has(r.cardId)) return;
+      push("deleted", c, r, oldD);
+    });
+    df.changed.forEach(([o, n]) => {
+      let extra = "";
+      if (isEntry && o.paid !== n.paid) extra = n.paid ? "marked paid" : "payment undone";
+      else if (c.amt && Number(c.amt(o)) !== Number(c.amt(n)) && !(c.ignore || []).includes("balance") ) extra = `amount ${Number(c.amt(o)).toLocaleString()} → ${Number(c.amt(n)).toLocaleString()}`;
+      push("edited", c, n, newD, extra);
+    });
+  });
+  // manual balance edit (accounts changed only in balance, nothing else in the log)
+  if (!out.length && oldD.accounts !== newD.accounts) {
+    newD.accounts.forEach((n) => {
+      const o = (oldD.accounts || []).find((x) => x.id === n.id);
+      if (o && Number(o.balance) !== Number(n.balance)) out.push({ id: uid(), ts, action: "edited", area: "Account", text: n.name, amount: Number(n.balance), extra: `balance ${Number(o.balance).toLocaleString()} → ${Number(n.balance).toLocaleString()}` });
+    });
+  }
+  return out;
+}
+
+// ---- Person payments: one lump-sum payment = ONE record (d.payments) -------
+// Entries it settles carry paymentId, so the whole payment can be edited or undone as a unit.
+function applyPersonPayment(d, kind, { personId, personName, amount, accountId, date }) {
+  const entriesKey = kind === "owedMe" ? "entriesOwedMe" : "entriesIOwe";
+  const unpaid = d[entriesKey].filter((e) => e.personId === personId && !e.paid).sort((a, b) => new Date(a.date) - new Date(b.date));
+  const outstanding = unpaid.reduce((sum, e) => sum + Number(e.amount || 0), 0);
+  const extra = Math.max(0, amount - outstanding);
+  const payId = uid();
+  const accounts = accountId ? bumpAccount(d.accounts, accountId, kind === "owedMe" ? amount : -amount) : d.accounts;
+  let remaining = amount;
+  const newEntries = [];
+  unpaid.forEach((e) => {
+    if (remaining <= 0.01) { newEntries.push(e); return; }
+    if (remaining >= e.amount - 0.01) { newEntries.push({ ...e, paid: true, paidAccountId: accountId || null, paidDate: date, paymentId: payId }); remaining -= e.amount; }
+    else {
+      newEntries.push({ ...e, id: uid(), amount: remaining, paid: true, paidAccountId: accountId || null, paidDate: date, mergeBackId: e.id, paymentId: payId });
+      newEntries.push({ ...e, amount: e.amount - remaining });
+      remaining = 0;
+    }
+  });
+  const result = { accounts, [entriesKey]: d[entriesKey].filter((e) => !(e.personId === personId && !e.paid)).concat(newEntries) };
+  const record = { id: payId, kind, personId, personName, amount, accountId: accountId || null, date, extra: 0, overPersonId: null, overEntryId: null, overPersonCreated: false };
+  if (extra > 0.01) {
+    const oppPeopleKey = kind === "owedMe" ? "peopleIOwe" : "peopleOwedMe";
+    const oppEntriesKey = kind === "owedMe" ? "entriesIOwe" : "entriesOwedMe";
+    let oppPeople = d[oppPeopleKey];
+    let match = oppPeople.find((p) => p.name.toLowerCase() === personName.toLowerCase());
+    if (!match) { match = { id: uid(), name: personName }; oppPeople = [...oppPeople, match]; record.overPersonCreated = true; }
+    const overId = uid();
+    record.extra = extra; record.overPersonId = match.id; record.overEntryId = overId;
+    result[oppPeopleKey] = oppPeople;
+    result[oppEntriesKey] = [...d[oppEntriesKey], { id: overId, personId: match.id, amount: extra, date, details: "Overpayment from settling up", paid: false, source: null, paymentId: payId }];
+  }
+  result.payments = [...(d.payments || []), record];
+  return result;
+}
+// Reverses a whole payment: account balance, split entries, and any overpayment entry.
+function reversePersonPayment(d, payId) {
+  const pay = (d.payments || []).find((x) => x.id === payId);
+  if (!pay) return {};
+  const kind = pay.kind;
+  const entriesKey = kind === "owedMe" ? "entriesOwedMe" : "entriesIOwe";
+  const accounts = pay.accountId ? bumpAccount(d.accounts, pay.accountId, kind === "owedMe" ? -pay.amount : pay.amount) : d.accounts;
+  let list = d[entriesKey];
+  const pieces = list.filter((e) => e.paymentId === payId);
+  pieces.forEach((pc) => {
+    const orig = pc.mergeBackId ? list.find((x) => x.id === pc.mergeBackId && !x.paid) : null;
+    if (orig) list = list.filter((x) => x.id !== pc.id).map((x) => (x.id === orig.id ? { ...x, amount: Number(x.amount || 0) + Number(pc.amount || 0) } : x));
+    else list = list.map((x) => (x.id === pc.id ? { ...x, paid: false, paidAccountId: null, paidDate: null, mergeBackId: undefined, paymentId: undefined } : x));
+  });
+  const result = { accounts, [entriesKey]: list, payments: d.payments.filter((x) => x.id !== payId) };
+  if (pay.overEntryId) {
+    const oppPeopleKey = kind === "owedMe" ? "peopleIOwe" : "peopleOwedMe";
+    const oppEntriesKey = kind === "owedMe" ? "entriesIOwe" : "entriesOwedMe";
+    const oppList = d[oppEntriesKey].filter((x) => x.id !== pay.overEntryId);
+    result[oppEntriesKey] = oppList;
+    if (pay.overPersonCreated && !oppList.some((x) => x.personId === pay.overPersonId)) result[oppPeopleKey] = d[oppPeopleKey].filter((p) => p.id !== pay.overPersonId);
+  }
+  return result;
+}
+
 const bumpAccount = (accounts, id, delta) => accounts.map((a) => (a.id === id ? { ...a, balance: Number(a.balance || 0) + delta } : a));
 const bumpCardDue = (cards, id, delta) => cards.map((c) => (c.id === id ? { ...c, due: Number(c.due || 0) + delta } : c));
 const bumpStatementDue = (cards, id, delta) => cards.map((c) => (c.id === id ? { ...c, dueAmount: Math.max(0, Number(c.dueAmount || 0) + delta) } : c));
@@ -410,7 +532,11 @@ function MoneyBoard({ user }) {
   const [data, setData, loaded, loadFailed, guard] = useStorage(user.uid);
   const [tab, setTab] = useState("dashboard");
   const tabRowRef = useRef(null);
-  const patch = (updater) => setData((d) => ({ ...d, ...(typeof updater === "function" ? updater(d) : updater) }));
+  const patch = (updater) => setData((d) => {
+    const next = { ...d, ...(typeof updater === "function" ? updater(d) : updater) };
+    try { const added = buildLogEntries(d, next); if (added.length) next.log = [...added, ...(d.log || [])].slice(0, 1000); } catch (e) { /* logging must never break saving */ }
+    return next;
+  });
 
 
   useEffect(() => {
@@ -459,6 +585,7 @@ function MoneyBoard({ user }) {
     { id: "wallet", label: "Wallet", icon: CreditCard },
     { id: "people", label: "People", icon: ArrowDownToLine },
     { id: "reports", label: "Reports", icon: BarChart3 },
+    { id: "log", label: "Log", icon: LogIcon },
   ];
 
   if (loadFailed) {
@@ -521,6 +648,7 @@ function MoneyBoard({ user }) {
             {tab === "transactions" && <TransactionsTab data={data} patch={patch} />}
             {tab === "wallet" && <WalletTab data={data} patch={patch} />}
             {tab === "people" && <PeopleSection data={data} patch={patch} />}
+            {tab === "log" && <LogTab data={data} />}
             {tab === "reports" && <ReportsTab data={data} setData={setData} uid={user.uid} />}
           </>
         )}
@@ -707,32 +835,7 @@ function QuickAddDetail({ action, data, patch, onDone, onBack }) {
   };
 
   const saveSettle = (kind) => ({ personId, personName, amount, accountId, date }) => {
-    const entriesKey = kind === "owedMe" ? "entriesOwedMe" : "entriesIOwe";
-    const unpaid = data[entriesKey].filter((e) => e.personId === personId && !e.paid).sort((a, b) => new Date(a.date) - new Date(b.date));
-    const outstanding = unpaid.reduce((sum, e) => sum + Number(e.amount || 0), 0);
-    const extra = amount - outstanding;
-    patch((d) => {
-      let accounts = accountId ? bumpAccount(d.accounts, accountId, kind === "owedMe" ? amount : -amount) : d.accounts;
-      let remaining = amount;
-      const newEntries = [];
-      unpaid.forEach((e) => {
-        if (remaining <= 0.01) { newEntries.push(e); return; }
-        if (remaining >= e.amount - 0.01) { newEntries.push({ ...e, paid: true, paidAccountId: accountId || null, paidDate: date }); remaining -= e.amount; }
-        else { newEntries.push({ ...e, id: uid(), amount: remaining, paid: true, paidAccountId: accountId || null, paidDate: date, mergeBackId: e.id }); newEntries.push({ ...e, amount: e.amount - remaining }); remaining = 0; }
-      });
-      const updatedEntries = d[entriesKey].filter((e) => !(e.personId === personId && !e.paid)).concat(newEntries);
-      const result = { accounts, [entriesKey]: updatedEntries };
-      if (extra > 0.01) {
-        const oppositePeopleKey = kind === "owedMe" ? "peopleIOwe" : "peopleOwedMe";
-        const oppositeEntriesKey = kind === "owedMe" ? "entriesIOwe" : "entriesOwedMe";
-        let oppositePeople = d[oppositePeopleKey];
-        let match = oppositePeople.find((p) => p.name.toLowerCase() === personName.toLowerCase());
-        if (!match) { match = { id: uid(), name: personName }; oppositePeople = [...oppositePeople, match]; }
-        result[oppositePeopleKey] = oppositePeople;
-        result[oppositeEntriesKey] = [...d[oppositeEntriesKey], { id: uid(), personId: match.id, amount: extra, date, details: "Overpayment from settling up", paid: false, source: null }];
-      }
-      return result;
-    });
+    patch((d) => applyPersonPayment(d, kind, { personId, personName, amount, accountId, date }));
     onDone();
   };
 
@@ -1648,11 +1751,13 @@ function AccountsTab({ data, patch }) {
       const card = data.cards.find((c) => c.id === p.cardId);
       rows.push({ date: p.date, amount: p.amount, dir: "out", label: "Card payment", detail: card?.name || "Card" });
     });
-    data.entriesOwedMe.filter((e) => e.paidAccountId === accountId).forEach((e) =>
+    (data.payments || []).filter((x) => x.accountId === accountId).forEach((x) =>
+      rows.push({ date: x.date, amount: x.amount, dir: x.kind === "owedMe" ? "in" : "out", label: x.kind === "owedMe" ? "Debt repaid" : "Debt paid back", detail: `${x.kind === "owedMe" ? "From" : "To"} ${x.personName || "someone"}` }));
+    data.entriesOwedMe.filter((e) => e.paidAccountId === accountId && !e.paymentId).forEach((e) =>
       rows.push({ date: e.paidDate, amount: e.amount, dir: "in", label: "Debt repaid", detail: `From ${personName(data.peopleOwedMe, e.personId) || "someone"}` }));
     data.entriesOwedMe.filter((e) => e.source?.type === "account" && e.source.id === accountId).forEach((e) =>
       rows.push({ date: e.date, amount: e.amount, dir: "out", label: "Lent out", detail: `To ${personName(data.peopleOwedMe, e.personId) || "someone"}` }));
-    data.entriesIOwe.filter((e) => e.paidAccountId === accountId).forEach((e) =>
+    data.entriesIOwe.filter((e) => e.paidAccountId === accountId && !e.paymentId).forEach((e) =>
       rows.push({ date: e.paidDate, amount: e.amount, dir: "out", label: "Debt paid back", detail: `To ${personName(data.peopleIOwe, e.personId) || "someone"}` }));
     data.entriesIOwe.filter((e) => e.source?.type === "account" && e.source.id === accountId).forEach((e) =>
       rows.push({ date: e.date, amount: e.amount, dir: "in", label: "Borrowed", detail: `From ${personName(data.peopleIOwe, e.personId) || "someone"}` }));
@@ -1754,6 +1859,7 @@ function PeopleTab({ title, tone, kind, data, patch }) {
   const [editEntry, setEditEntry] = useState(null);
   const [payEntry, setPayEntry] = useState(null);
   const [settleAllFor, setSettleAllFor] = useState(null);
+  const [editPayment, setEditPayment] = useState(null);
   const [expanded, setExpanded] = useState(null);
 
   const removePerson = (id) => {
@@ -1766,7 +1872,7 @@ function PeopleTab({ title, tone, kind, data, patch }) {
         ({ accounts, cards } = applySource(accounts, cards, src, e.amount, -1));
         if (e.paid && e.paidAccountId) accounts = bumpAccount(accounts, e.paidAccountId, kind === "owedMe" ? -e.amount : e.amount);
       });
-      return { accounts, cards, [peopleKey]: people.filter((p) => p.id !== id), [entriesKey]: d[entriesKey].filter((e) => e.personId !== id) };
+      return { accounts, cards, [peopleKey]: people.filter((p) => p.id !== id), [entriesKey]: d[entriesKey].filter((e) => e.personId !== id), payments: (d.payments || []).filter((x) => x.personId !== id) };
     });
   };
   const savePerson = (name) => {
@@ -1798,7 +1904,9 @@ function PeopleTab({ title, tone, kind, data, patch }) {
         const diff = updated.amount - original.amount;
         accounts = bumpAccount(accounts, original.paidAccountId, (kind === "owedMe" ? 1 : -1) * diff);
       }
-      return { accounts, cards, [entriesKey]: d[entriesKey].map((x) => (x.id === original.id ? { ...x, amount: updated.amount, date: updated.date, details: updated.details, source: updated.source } : x)) };
+      let payments = d.payments || [];
+      if (original.paid && original.paymentId) payments = payments.map((x) => (x.id === original.paymentId ? { ...x, amount: x.amount + (updated.amount - original.amount) } : x));
+      return { accounts, cards, payments, [entriesKey]: d[entriesKey].map((x) => (x.id === original.id ? { ...x, amount: updated.amount, date: updated.date, details: updated.details, source: updated.source } : x)) };
     });
     setEditEntry(null);
   };
@@ -1840,50 +1948,35 @@ function PeopleTab({ title, tone, kind, data, patch }) {
       if (entry.paid && entry.paidAccountId) {
         accounts = bumpAccount(accounts, entry.paidAccountId, kind === "owedMe" ? -entry.amount : entry.amount);
       }
-      return { accounts, cards, [entriesKey]: d[entriesKey].filter((x) => x.id !== entry.id) };
+      let payments = d.payments || [];
+      if (entry.paid && entry.paymentId) payments = payments.map((x) => (x.id === entry.paymentId ? { ...x, amount: x.amount - entry.amount } : x)).filter((x) => x.amount > 0.01 || x.extra > 0.01);
+      return { accounts, cards, payments, [entriesKey]: d[entriesKey].filter((x) => x.id !== entry.id) };
     });
   };
   // Settles every unpaid entry for a person at once. If they paid more than
   // the total owed, the extra is recorded as a new entry on the opposite
   // ledger (so if they overpay what they owed you, you now owe them the difference).
   const settleAll = (personId, personName, { amount, accountId, date }) => {
-    const unpaid = entries
-      .filter((e) => e.personId === personId && !e.paid)
-      .sort((a, b) => new Date(a.date) - new Date(b.date)); // oldest debt paid off first
-    const outstanding = unpaid.reduce((sum, e) => sum + Number(e.amount || 0), 0);
-    const extra = amount - outstanding;
-    patch((d) => {
-      let accounts = accountId ? bumpAccount(d.accounts, accountId, kind === "owedMe" ? amount : -amount) : d.accounts;
-      let remaining = amount;
-      const newEntries = [];
-      unpaid.forEach((e) => {
-        if (remaining <= 0.01) { newEntries.push(e); return; } // untouched, still fully unpaid
-        if (remaining >= e.amount - 0.01) {
-          newEntries.push({ ...e, paid: true, paidAccountId: accountId || null, paidDate: date });
-          remaining -= e.amount;
-        } else {
-          // partial payment lands mid-entry: split into a paid portion and a smaller remaining unpaid portion
-          newEntries.push({ ...e, id: uid(), amount: remaining, paid: true, paidAccountId: accountId || null, paidDate: date, mergeBackId: e.id });
-          newEntries.push({ ...e, amount: e.amount - remaining });
-          remaining = 0;
-        }
-      });
-      const updatedEntries = d[entriesKey]
-        .filter((e) => !(e.personId === personId && !e.paid)) // remove the old unpaid ones we just replaced
-        .concat(newEntries);
-      const result = { accounts, [entriesKey]: updatedEntries };
-      if (extra > 0.01) {
-        const oppositePeopleKey = kind === "owedMe" ? "peopleIOwe" : "peopleOwedMe";
-        const oppositeEntriesKey = kind === "owedMe" ? "entriesIOwe" : "entriesOwedMe";
-        let oppositePeople = d[oppositePeopleKey];
-        let match = oppositePeople.find((p) => p.name.toLowerCase() === personName.toLowerCase());
-        if (!match) { match = { id: uid(), name: personName }; oppositePeople = [...oppositePeople, match]; }
-        result[oppositePeopleKey] = oppositePeople;
-        result[oppositeEntriesKey] = [...d[oppositeEntriesKey], { id: uid(), personId: match.id, amount: extra, date, details: "Overpayment from settling up", paid: false, source: null }];
-      }
-      return result;
-    });
+    patch((d) => applyPersonPayment(d, kind, { personId, personName, amount, accountId, date }));
     setSettleAllFor(null);
+  };
+  const undoWholePayment = (payId) => {
+    const pay = (data.payments || []).find((x) => x.id === payId);
+    if (!pay) return;
+    const oppKey = kind === "owedMe" ? "entriesIOwe" : "entriesOwedMe";
+    const over = pay.overEntryId ? data[oppKey].find((x) => x.id === pay.overEntryId) : null;
+    if (over && over.paid) { alert("The overpayment from this payment has already been settled. Undo that first, then undo this payment."); return; }
+    if (!confirm(`Undo this payment of ${fmt(pay.amount)} completely? The account balance and all ${pay.personName || "their"} entries go back to how they were before.`)) return;
+    patch((d) => reversePersonPayment(d, payId));
+  };
+  const saveEditedPayment = (payId, v) => {
+    patch((d) => {
+      const pay = (d.payments || []).find((x) => x.id === payId);
+      if (!pay) return {};
+      const r1 = reversePersonPayment(d, payId);
+      return applyPersonPayment({ ...d, ...r1 }, pay.kind, { personId: pay.personId, personName: pay.personName, ...v });
+    });
+    setEditPayment(null);
   };
 
   return (
@@ -1921,6 +2014,17 @@ function PeopleTab({ title, tone, kind, data, patch }) {
                     <button style={{ ...s.smallAddBtn, color: "#4C9A82" }} onClick={() => setSettleAllFor(p)}><Check size={13} /> Log payment (owes {fmt(outstanding)})</button>
                   )}
                 </div>
+                {(data.payments || []).filter((x) => x.personId === p.id && x.kind === kind).sort((a, b) => new Date(b.date) - new Date(a.date)).map((pay) => (
+                  <div key={pay.id} style={{ ...s.historyRow, background: "#18241F", borderRadius: 8, padding: "8px 10px", marginBottom: 6 }}>
+                    <span style={{ color: "#4C9A82" }}>{fmtDate(pay.date)}</span>
+                    <span style={{ flex: 1, color: "#9FD3BF", fontSize: 12 }}>
+                      Payment {kind === "owedMe" ? "received" : "made"}{pay.accountId ? ` · ${accountName(pay.accountId) || "account"}` : " · no account"}{pay.extra > 0.01 ? ` · incl. ${fmt(pay.extra)} extra` : ""}
+                    </span>
+                    <span style={{ ...s.mono, color: "#4C9A82" }}>{fmt(pay.amount)}</span>
+                    <button style={s.payBtn} onClick={() => setEditPayment(pay)}>Edit</button>
+                    <button style={{ ...s.payBtn, background: "#2A2418", color: "#C6A15B", borderColor: "#4A3F2A" }} onClick={() => undoWholePayment(pay.id)}>Undo</button>
+                  </div>
+                ))}
                 {personEntries.length === 0 ? <Empty text="No entries yet." /> : personEntries.map((e) => (
                   <div key={e.id} style={s.historyRow} onClick={() => setEditEntry(e)}>
                     <span style={{ textDecoration: e.paid ? "line-through" : "none", color: e.paid ? "#5C6478" : "#EAEBEF" }}>{fmtDate(e.date)}</span>
@@ -1935,7 +2039,7 @@ function PeopleTab({ title, tone, kind, data, patch }) {
                       </>
                     ) : (
                       <>
-                        <button style={{ ...s.payBtn, background: "#2A2418", color: "#C6A15B", borderColor: "#4A3F2A" }} onClick={(ev) => { ev.stopPropagation(); undoPayment(e); }}>Undo</button>
+                        <button style={{ ...s.payBtn, background: "#2A2418", color: "#C6A15B", borderColor: "#4A3F2A" }} onClick={(ev) => { ev.stopPropagation(); e.paymentId ? undoWholePayment(e.paymentId) : undoPayment(e); }}>{e.paymentId ? "Undo payment" : "Undo"}</button>
                         <button style={s.rowDelete} onClick={(ev) => { ev.stopPropagation(); deleteEntry(e); }}><Trash2 size={12} /></button>
                       </>
                     )}
@@ -1964,6 +2068,16 @@ function PeopleTab({ title, tone, kind, data, patch }) {
       {payEntry && (
         <Modal title={kind === "owedMe" ? "Mark as paid to you" : "Mark as paid by you"} onClose={() => setPayEntry(null)}>
           <MarkPaidForm accounts={data.accounts} label={kind === "owedMe" ? "Deposit into" : "Pay from"} onSave={(accountId) => markPaid(payEntry, accountId)} />
+        </Modal>
+      )}
+      {editPayment && (
+        <Modal title="Edit payment" onClose={() => setEditPayment(null)}>
+          <SettleAllForm
+            accounts={data.accounts} kind={kind} editing
+            outstanding={entries.filter((e) => e.personId === editPayment.personId && !e.paid).reduce((sum, e) => sum + Number(e.amount || 0), 0) + entries.filter((e) => e.paymentId === editPayment.id).reduce((sum, e) => sum + Number(e.amount || 0), 0)}
+            initial={editPayment}
+            onSave={(v) => saveEditedPayment(editPayment.id, v)}
+          />
         </Modal>
       )}
       {settleAllFor && (
@@ -2014,17 +2128,17 @@ function PersonEntryForm({ accounts, cards, kind, initial, onSave }) {
     </FormShell>
   );
 }
-function SettleAllForm({ accounts, kind, outstanding, onSave }) {
-  const [amount, setAmount] = useState(String(outstanding));
-  const [accountId, setAccountId] = useState(accounts[0]?.id || "");
-  const [date, setDate] = useState(todayISO());
+function SettleAllForm({ accounts, kind, outstanding, onSave, initial, editing }) {
+  const [amount, setAmount] = useState(String(initial ? initial.amount : outstanding));
+  const [accountId, setAccountId] = useState(initial ? (initial.accountId || "") : (accounts[0]?.id || ""));
+  const [date, setDate] = useState(initial ? initial.date : todayISO());
   const numAmount = Number(amount);
   const extra = numAmount - outstanding;
   const short = outstanding - numAmount;
   const valid = amount !== "" && numAmount > 0;
   const verb = kind === "owedMe" ? "received" : "paid";
   return (
-    <FormShell onSubmit={() => valid && onSave({ amount: numAmount, accountId: accountId || null, date })} valid={valid} submitLabel="Log payment">
+    <FormShell onSubmit={() => valid && onSave({ amount: numAmount, accountId: accountId || null, date })} valid={valid} submitLabel={editing ? "Save payment" : "Log payment"}>
       <div style={{ fontSize: 13, marginBottom: 12 }}>Total owed: <strong>{fmt(outstanding)}</strong></div>
       <Field label={`Amount ${verb} (AED)`}><input style={s.input} type="number" value={amount} onChange={(e) => setAmount(e.target.value)} autoFocus /></Field>
       <Field label="Date"><input style={s.input} type="date" value={date} onChange={(e) => setDate(e.target.value)} /></Field>
@@ -2176,6 +2290,35 @@ function SnapshotRestore({ uid, onRestore }) {
   );
 }
 
+function LogTab({ data }) {
+  const [filter, setFilter] = useState("all");
+  const [q, setQ] = useState("");
+  const rows = (data.log || []).filter((r) => (filter === "all" || r.action === filter) && (!q || (r.text + " " + r.area + " " + (r.extra || "")).toLowerCase().includes(q.toLowerCase())));
+  const colors = { added: "#4C9A82", edited: "#C6A15B", deleted: "#C0675F" };
+  const fmtTs = (iso) => { try { return new Date(iso).toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" }); } catch (e) { return iso; } };
+  return (
+    <div>
+      <div style={s.rowHead}><h2 style={s.sectionTitle}>Activity log</h2></div>
+      <div style={{ fontSize: 12, color: "#8B93A3", marginBottom: 10 }}>Everything you add, edit, undo or delete is recorded here (newest first). Starts from version .9 — older changes weren't tracked.</div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+        {["all", "added", "edited", "deleted"].map((f) => (
+          <button key={f} onClick={() => setFilter(f)} style={{ ...s.payBtn, ...(filter === f ? { borderColor: "#C6A15B", color: "#C6A15B" } : {}) }}>{f === "all" ? "All" : f[0].toUpperCase() + f.slice(1)}</button>
+        ))}
+      </div>
+      <input style={{ ...s.input, marginBottom: 10 }} placeholder="Search log…" value={q} onChange={(e) => setQ(e.target.value)} />
+      {rows.length === 0 ? <Empty text="Nothing logged yet." /> : rows.slice(0, 300).map((r) => (
+        <div key={r.id} style={{ ...s.historyRow, alignItems: "flex-start", flexWrap: "wrap" }}>
+          <span style={{ color: colors[r.action] || "#EAEBEF", fontSize: 11, fontWeight: 700, minWidth: 54, textTransform: "uppercase" }}>{r.action}</span>
+          <span style={{ flex: 1, minWidth: 120 }}>
+            <div style={{ fontSize: 13 }}>{r.area}{r.text ? ` — ${r.text}` : ""}</div>
+            <div style={{ fontSize: 11, color: "#7C8698" }}>{fmtTs(r.ts)}{r.extra ? ` · ${r.extra}` : ""}</div>
+          </span>
+          {r.amount != null && r.area !== "Account" && r.area !== "Card" && <span style={s.mono}>{fmt(r.amount)}</span>}
+        </div>
+      ))}
+    </div>
+  );
+}
 function ReportsTab({ data, setData, uid }) {
   const [showSnapshots, setShowSnapshots] = useState(false);
   const [mode, setMode] = useState("monthly");
